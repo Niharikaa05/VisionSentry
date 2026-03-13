@@ -1,0 +1,7 @@
+{
+  "name": "Second Sentry",
+  "description": "Advanced AI-powered border surveillance and monitoring system with real-time threat detection and automated alerting.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}

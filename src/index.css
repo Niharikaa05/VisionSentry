@@ -1,0 +1,75 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  
+  --color-sentry-bg: #0a0a0b;
+  --color-sentry-panel: #141417;
+  --color-sentry-border: #27272a;
+  --color-sentry-accent: #3b82f6;
+  --color-sentry-danger: #ef4444;
+  --color-sentry-warning: #f59e0b;
+  --color-sentry-success: #10b981;
+}
+
+@layer base {
+  body {
+    @apply bg-sentry-bg text-zinc-100 font-sans antialiased overflow-hidden;
+  }
+}
+
+.scanline {
+  width: 100%;
+  height: 2px;
+  background: rgba(59, 130, 246, 0.1);
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 10;
+  pointer-events: none;
+  animation: scan 4s linear infinite;
+}
+
+@keyframes scan {
+  0% { top: 0; }
+  100% { top: 100%; }
+}
+
+.grid-overlay {
+  background-image: linear-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+
+.vision-thermal {
+  filter: contrast(1.5) brightness(1.2) hue-rotate(180deg) saturate(2);
+  background: linear-gradient(to right, #0000ff, #ff0000);
+  mix-blend-mode: screen;
+}
+
+.vision-night {
+  filter: sepia(100%) hue-rotate(90deg) brightness(0.8) contrast(1.2);
+}
+
+.vision-night::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle, transparent 30%, rgba(0, 50, 0, 0.4) 100%);
+  pointer-events: none;
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: var(--color-sentry-border);
+  border-radius: 10px;
+}
+
