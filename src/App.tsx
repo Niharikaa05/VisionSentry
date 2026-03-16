@@ -26,14 +26,21 @@ import {
   Wind,
   Thermometer,
   MessageSquare,
+  Volume2,
+  VolumeX,
+  Mic,
+  MicOff,
+  Send,
+  Share2,
   Database,
   Radio,
   Target,
   Zap
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Alert, AlertSeverity, SystemLog, Personnel, WeatherInfo } from './types';
+import { Alert, AlertSeverity, SystemLog, Personnel, WeatherInfo, TacticalEntity, ChatMessage } from './types';
 import { analyzeFrame } from './services/aiService';
+import { fetchWeather } from './services/weatherService';
 
 // --- Login Component ---
 function Login({ onLogin }: { onLogin: () => void }) {
@@ -99,7 +106,7 @@ function Login({ onLogin }: { onLogin: () => void }) {
                 <Shield className="w-6 h-6 text-white" />
               </div>
               <div>
-                <h1 className="text-xl font-bold text-white tracking-tight">SECOND SENTRY</h1>
+                <h1 className="text-xl font-bold text-white tracking-tight">VISION SENTRY</h1>
                 <p className="text-xs text-zinc-500 font-medium uppercase tracking-widest mt-0.5">Border Surveillance System</p>
               </div>
             </div>
@@ -183,14 +190,51 @@ function Login({ onLogin }: { onLogin: () => void }) {
   );
 }
 
+// --- Constants for Map ---
+const SECTOR_DEFINITIONS = [
+  { id: 'SEC_ALPHA', name: 'Sector Alpha', points: '20,10 40,5 60,15 50,30 30,25' },
+  { id: 'SEC_BRAVO', name: 'Sector Bravo', points: '70,40 90,35 95,60 75,65 65,50' },
+  { id: 'SEC_CHARLIE', name: 'Sector Charlie', points: '10,60 30,55 40,80 20,90 5,75' },
+];
+
+const PATROL_ROUTES = [
+  { id: 'R1', name: 'Alpha Route', path: '10,10 30,20 50,10 70,20 90,10', color: 'rgba(255, 255, 255, 0.2)' },
+  { id: 'R2', name: 'Bravo Route', path: '10,90 30,70 50,90 70,70 90,90', color: 'rgba(255, 255, 255, 0.2)' },
+];
+
 // --- Live Map Component ---
-function LiveMap({ alerts }: { alerts: Alert[] }) {
+function LiveMap({ alerts, coords, entities }: { alerts: Alert[], coords: { lat: number, lng: number }, entities: TacticalEntity[] }) {
   const [layer, setLayer] = useState<'satellite' | 'topo' | 'heat'>('satellite');
   const [zoom, setZoom] = useState(1);
   const [dronePos, setDronePos] = useState({ x: 20, y: 20 });
   const [droneTrail, setDroneTrail] = useState<{x: number, y: number}[]>([]);
   const [showWeather, setShowWeather] = useState(false);
+  const [showZones, setShowZones] = useState(true);
+  const [showRoutes, setShowRoutes] = useState(true);
   const [selectedSector, setSelectedSector] = useState<string | null>(null);
+
+  // Dynamic sector statuses based on entities and alerts
+  const getSectorStatus = (sectorId: string): 'secure' | 'warning' | 'alert' => {
+    // If there's an active alert in this sector (simulated by random or proximity)
+    // For now, let's use the entities to determine status
+    const sectorEntities = entities.filter(e => {
+      // Simple logic: Alpha is top, Bravo is right, Charlie is bottom
+      if (sectorId === 'SEC_ALPHA') return e.y < 40;
+      if (sectorId === 'SEC_BRAVO') return e.x > 60;
+      if (sectorId === 'SEC_CHARLIE') return e.y > 60;
+      return false;
+    });
+
+    if (sectorEntities.some(e => e.type === 'armed')) return 'alert';
+    if (sectorEntities.some(e => e.type === 'suspicious')) return 'warning';
+    return 'secure';
+  };
+
+  const getSectorColor = (status: 'secure' | 'warning' | 'alert') => {
+    if (status === 'alert') return 'rgba(239, 68, 68, 0.3)'; // red
+    if (status === 'warning') return 'rgba(245, 158, 11, 0.3)'; // orange
+    return 'rgba(16, 185, 129, 0.2)'; // green
+  };
 
   // Drone movement simulation
   useEffect(() => {
@@ -209,30 +253,70 @@ function LiveMap({ alerts }: { alerts: Alert[] }) {
 
   return (
     <div className="w-full h-full bg-zinc-900 rounded-xl border border-sentry-border relative overflow-hidden flex flex-col">
-      {/* Map Controls */}
-      <div className="absolute top-4 left-4 z-20 flex flex-col gap-2">
-        <div className="bg-black/60 backdrop-blur-md p-1 rounded-lg border border-white/10 flex flex-col gap-1">
+      {/* Map Controls - Ultra-compact to prevent overlap */}
+      <div className="absolute top-4 left-4 z-50 flex flex-col gap-2 pointer-events-auto">
+        {/* Layer Selection */}
+        <div className="bg-black/80 backdrop-blur-md p-1 rounded border border-white/10 flex flex-col gap-1 shadow-xl">
           <MapControlButton active={layer === 'satellite'} onClick={() => setLayer('satellite')} label="SAT" />
           <MapControlButton active={layer === 'topo'} onClick={() => setLayer('topo')} label="TOPO" />
           <MapControlButton active={layer === 'heat'} onClick={() => setLayer('heat')} label="HEAT" />
         </div>
-        <div className="bg-black/60 backdrop-blur-md p-1 rounded-lg border border-white/10 flex flex-col gap-1">
-          <button onClick={() => setZoom(z => Math.min(2, z + 0.1))} className="p-1.5 hover:bg-white/10 rounded text-white">+</button>
-          <button onClick={() => setZoom(z => Math.max(0.5, z - 0.1))} className="p-1.5 hover:bg-white/10 rounded text-white">-</button>
+
+        {/* Zoom Controls */}
+        <div className="bg-black/80 backdrop-blur-md p-1 rounded border border-white/10 flex flex-col gap-1 shadow-xl">
+          <button 
+            onClick={(e) => { e.stopPropagation(); setZoom(z => Math.min(3, z + 0.2)); }} 
+            className="w-6 h-6 flex items-center justify-center hover:bg-white/10 rounded text-white font-bold text-sm transition-colors"
+          >
+            +
+          </button>
+          <button 
+            onClick={(e) => { e.stopPropagation(); setZoom(z => Math.max(0.5, z - 0.2)); }} 
+            className="w-6 h-6 flex items-center justify-center hover:bg-white/10 rounded text-white font-bold text-sm transition-colors"
+          >
+            -
+          </button>
         </div>
-        <button 
-          onClick={() => setShowWeather(!showWeather)}
-          className={`bg-black/60 backdrop-blur-md p-2 rounded-lg border border-white/10 text-white transition-colors ${showWeather ? 'text-sentry-accent border-sentry-accent/50' : ''}`}
-        >
-          <CloudRain className="w-4 h-4" />
-        </button>
+
+        {/* Tactical Overlays */}
+        <div className="flex flex-col gap-1">
+          <button 
+            onClick={(e) => { e.stopPropagation(); setShowWeather(!showWeather); }}
+            className={`bg-black/80 backdrop-blur-md p-1.5 rounded border transition-all shadow-xl ${showWeather ? 'text-sentry-accent border-sentry-accent/50 bg-sentry-accent/10' : 'text-white border-white/10 hover:bg-white/5'}`}
+            title="Weather Simulation"
+          >
+            <CloudRain className="w-3.5 h-3.5" />
+          </button>
+          
+          <button 
+            onClick={(e) => { e.stopPropagation(); setShowZones(!showZones); }}
+            className={`bg-black/80 backdrop-blur-md p-1.5 rounded border transition-all shadow-xl ${showZones ? 'text-sentry-accent border-sentry-accent/50 bg-sentry-accent/10' : 'text-white border-white/10 hover:bg-white/5'}`}
+            title="Surveillance Zones"
+          >
+            <Target className="w-3.5 h-3.5" />
+          </button>
+
+          <button 
+            onClick={(e) => { e.stopPropagation(); setShowRoutes(!showRoutes); }}
+            className={`bg-black/80 backdrop-blur-md p-1.5 rounded border transition-all shadow-xl ${showRoutes ? 'text-sentry-accent border-sentry-accent/50 bg-sentry-accent/10' : 'text-white border-white/10 hover:bg-white/5'}`}
+            title="Patrol Routes"
+          >
+            <Navigation className="w-3.5 h-3.5" />
+          </button>
+        </div>
       </div>
 
-      {/* Sector Status Overlay */}
-      <div className="absolute top-4 right-4 z-20 flex flex-col gap-1">
-        <SectorStatus label="SEC_A" status="secure" onClick={() => setSelectedSector('SEC_A')} />
-        <SectorStatus label="SEC_B" status="warning" onClick={() => setSelectedSector('SEC_B')} />
-        <SectorStatus label="SEC_C" status="secure" onClick={() => setSelectedSector('SEC_C')} />
+      {/* Sector Status Overlay - Dynamic based on status */}
+      <div className="absolute bottom-20 right-4 z-20 flex flex-col gap-1">
+        {SECTOR_DEFINITIONS.map(sector => (
+          <div key={sector.id}>
+            <SectorStatus 
+              label={sector.id} 
+              status={getSectorStatus(sector.id)} 
+              onClick={() => setSelectedSector(sector.id)} 
+            />
+          </div>
+        ))}
       </div>
 
       {/* Sector Details Modal */}
@@ -249,10 +333,10 @@ function LiveMap({ alerts }: { alerts: Alert[] }) {
               <button onClick={() => setSelectedSector(null)} className="text-zinc-500 hover:text-white">×</button>
             </div>
             <div className="space-y-2">
-              <DetailRow label="Personnel" value={`${Math.floor(Math.random() * 15) + 5} Active`} />
-              <DetailRow label="Last Scan" value={`${Math.floor(Math.random() * 10) + 1}m ago`} />
-              <DetailRow label="Stability" value={`${95 + Math.floor(Math.random() * 5)}%`} />
-              <DetailRow label="Threats" value="0" />
+              <DetailRow label="Personnel" value={`${entities.filter(e => e.type === 'friendly').length} Active`} />
+              <DetailRow label="Last Scan" value="Real-time" />
+              <DetailRow label="Stability" value={entities.some(e => e.type === 'armed') ? 'CRITICAL' : 'STABLE'} />
+              <DetailRow label="Threats" value={entities.filter(e => e.type !== 'friendly').length.toString()} />
               <div className="pt-2 border-t border-white/10">
                 <div className="flex items-center gap-1">
                   <div className="w-1 h-1 rounded-full bg-sentry-success animate-ping" />
@@ -264,26 +348,27 @@ function LiveMap({ alerts }: { alerts: Alert[] }) {
         )}
       </AnimatePresence>
 
-      <div className="flex-1 relative overflow-hidden">
+      <div className="flex-1 relative overflow-hidden bg-black/40">
+        {/* Scaling Container - Wraps everything to ensure zoom works */}
         <motion.div 
           animate={{ scale: zoom }}
-          className="absolute inset-0 grid-overlay opacity-30 transition-transform duration-500" 
-        />
-        
-        {/* Map Content */}
-        <div className="absolute inset-0 flex items-center justify-center">
+          transition={{ type: 'spring', stiffness: 200, damping: 25 }}
+          className="absolute inset-0 origin-center flex items-center justify-center"
+        >
+          <div className="absolute inset-0 grid-overlay opacity-30 pointer-events-none" />
+          
           <div className="relative w-full h-full">
             {/* Weather Simulation Overlay */}
             {showWeather && (
               <div className="absolute inset-0 z-10 pointer-events-none overflow-hidden">
                 <div className="absolute inset-0 bg-blue-900/10" />
-                {[...Array(20)].map((_, i) => (
+                {[...Array(50)].map((_, i) => (
                   <motion.div
                     key={i}
                     initial={{ y: -20, x: Math.random() * 100 + '%' }}
                     animate={{ y: 1000 }}
-                    transition={{ duration: 1 + Math.random(), repeat: Infinity, ease: "linear" }}
-                    className="absolute w-px h-4 bg-blue-400/30"
+                    transition={{ duration: 0.4 + Math.random() * 0.6, repeat: Infinity, ease: "linear" }}
+                    className="absolute w-[1px] h-10 bg-blue-400/40"
                   />
                 ))}
               </div>
@@ -305,6 +390,50 @@ function LiveMap({ alerts }: { alerts: Alert[] }) {
             {/* Simulated Border Line */}
             <div className="absolute top-1/2 left-0 w-full h-px bg-red-500/30 border-t border-dashed border-red-500/50" />
             <div className="absolute top-[48%] left-4 text-[10px] font-mono text-red-500/50 uppercase">Border Line Alpha-7</div>
+
+            {/* Surveillance Zones - Color-coded by status */}
+            {showZones && (
+              <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">
+                {SECTOR_DEFINITIONS.map(sector => {
+                  const status = getSectorStatus(sector.id);
+                  return (
+                    <g key={sector.id}>
+                      <motion.polygon 
+                        points={sector.points} 
+                        initial={false}
+                        animate={{ fill: getSectorColor(status) }}
+                        stroke={status === 'alert' ? 'rgba(239, 68, 68, 0.5)' : 'rgba(255,255,255,0.2)'} 
+                        strokeWidth={status === 'alert' ? "1" : "0.5"}
+                        className="transition-colors duration-500"
+                      />
+                      <text 
+                        x={sector.points.split(' ')[0].split(',')[0]} 
+                        y={sector.points.split(' ')[0].split(',')[1]} 
+                        className="text-[3px] fill-white/50 font-mono font-black"
+                      >
+                        {sector.name}
+                      </text>
+                    </g>
+                  );
+                })}
+              </svg>
+            )}
+
+            {/* Patrol Routes */}
+            {showRoutes && (
+              <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">
+                {PATROL_ROUTES.map(route => (
+                  <polyline 
+                    key={route.id}
+                    points={route.path}
+                    fill="none"
+                    stroke={route.color}
+                    strokeWidth="0.5"
+                    strokeDasharray="2,2"
+                  />
+                ))}
+              </svg>
+            )}
 
             {/* Radar Circles */}
             <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[80%] aspect-square border border-white/5 rounded-full" />
@@ -340,41 +469,107 @@ function LiveMap({ alerts }: { alerts: Alert[] }) {
             </motion.div>
 
             {/* Alert Markers */}
-            {alerts.map((alert, i) => (
+            {alerts.filter(a => a.status === 'active').map((alert, i) => (
               <motion.div
                 key={alert.id}
                 initial={{ scale: 0, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                className="absolute"
+                animate={{ 
+                  scale: [1 / zoom, 1.2 / zoom, 1 / zoom], // Compensate for map zoom
+                  opacity: 1 
+                }}
+                transition={{ repeat: Infinity, duration: 2 }}
+                className="absolute cursor-pointer group/marker"
                 style={{ 
-                  top: `${40 + (i * 10) % 20}%`, 
-                  left: `${30 + (i * 15) % 40}%` 
+                  top: `${35 + (i * 12) % 30}%`, 
+                  left: `${25 + (i * 18) % 50}%` 
                 }}
               >
-                <div className={`w-3 h-3 rounded-full animate-ping absolute ${
+                <div className={`w-4 h-4 rounded-full animate-ping absolute ${
                   alert.severity === 'critical' ? 'bg-red-500' : 'bg-orange-500'
                 }`} />
-                <div className={`w-3 h-3 rounded-full relative ${
+                <div className={`w-4 h-4 rounded-full relative border-2 border-white/50 ${
                   alert.severity === 'critical' ? 'bg-red-500' : 'bg-orange-500'
                 }`} />
-                <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-black/80 px-1.5 py-0.5 rounded border border-white/10 whitespace-nowrap">
-                  <span className="text-[8px] font-mono text-white uppercase">{alert.severity} THREAT</span>
+                
+                {/* Threat Label */}
+                <div className="absolute top-6 left-1/2 -translate-x-1/2 bg-black/90 px-2 py-1 rounded border border-white/20 whitespace-nowrap opacity-0 group-hover/marker:opacity-100 transition-opacity z-50">
+                  <div className="flex flex-col gap-0.5">
+                    <span className="text-[9px] font-black text-white uppercase tracking-tighter">{alert.severity} THREAT</span>
+                    <span className="text-[7px] font-mono text-zinc-400 max-w-[120px] truncate">{alert.description}</span>
+                  </div>
+                </div>
+              </motion.div>
+            ))}
+
+            {/* Tactical Entities (Personnel/Threats) */}
+            {entities.map((entity) => (
+              <motion.div
+                key={entity.id}
+                className="absolute"
+                style={{ left: `${entity.x}%`, top: `${entity.y}%` }}
+                animate={{ scale: 1 / zoom }} // Compensate for map zoom
+              >
+                <div className="relative group/entity">
+                  <div className={`p-1 rounded-full border shadow-lg transition-all ${
+                    entity.type === 'friendly' ? 'bg-blue-600/20 border-blue-500 text-blue-400' :
+                    entity.type === 'armed' ? 'bg-red-600/20 border-red-500 text-red-500 animate-pulse' :
+                    'bg-orange-600/20 border-orange-500 text-orange-400'
+                  }`}>
+                    {entity.type === 'friendly' ? <User className="w-3 h-3" /> :
+                     entity.type === 'armed' ? <AlertTriangle className="w-3 h-3" /> :
+                     <Target className="w-3 h-3" />}
+                  </div>
+
+                  {/* Entity Label */}
+                  <div className="absolute -top-12 left-1/2 -translate-x-1/2 bg-black/90 px-2 py-1.5 rounded border border-white/10 whitespace-nowrap opacity-0 group-hover/entity:opacity-100 transition-opacity z-50 shadow-2xl">
+                    <div className="flex flex-col items-center gap-1">
+                      <span className="text-[8px] font-black text-white uppercase tracking-wider">{entity.label}</span>
+                      <div className="flex items-center gap-1.5">
+                        <span className={`text-[6px] font-bold px-1 rounded ${
+                          entity.movementPattern === 'aggressive' ? 'bg-red-500/20 text-red-500' :
+                          entity.movementPattern === 'stealthy' ? 'bg-purple-500/20 text-purple-400' :
+                          'bg-zinc-500/20 text-zinc-400'
+                        }`}>
+                          {entity.movementPattern?.toUpperCase()}
+                        </span>
+                        <span className="text-[6px] font-mono text-zinc-500">
+                          {entity.detectedBy} {entity.hasId ? '| ID_VERIFIED' : '| NO_ID'}
+                        </span>
+                      </div>
+                      {entity.visualCues && (
+                        <div className="flex flex-wrap gap-1 justify-center max-w-[120px]">
+                          {entity.visualCues.map(cue => (
+                            <span key={cue} className="text-[5px] text-zinc-400 border border-white/5 px-1 rounded bg-white/5">
+                              {cue}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Detection Ring for Suspicious/Armed */}
+                  {entity.type !== 'friendly' && (
+                    <div className={`absolute inset-0 rounded-full animate-ping opacity-30 ${
+                      entity.type === 'armed' ? 'bg-red-500' : 'bg-orange-500'
+                    }`} />
+                  )}
                 </div>
               </motion.div>
             ))}
           </div>
-        </div>
+        </motion.div>
       </div>
 
       <div className="p-4 border-t border-sentry-border bg-black/20 flex justify-between items-center">
         <div className="flex gap-4">
           <div className="flex items-center gap-2">
             <Navigation className="w-3 h-3 text-sentry-accent" />
-            <span className="text-[10px] font-mono">LAT: 32.7266° N</span>
+            <span className="text-[10px] font-mono">LAT: {coords.lat.toFixed(4)}° {coords.lat >= 0 ? 'N' : 'S'}</span>
           </div>
           <div className="flex items-center gap-2">
             <Navigation className="w-3 h-3 text-sentry-accent" />
-            <span className="text-[10px] font-mono">LONG: 74.8570° E</span>
+            <span className="text-[10px] font-mono">LONG: {coords.lng.toFixed(4)}° {coords.lng >= 0 ? 'E' : 'W'}</span>
           </div>
         </div>
         <div className="flex items-center gap-4">
@@ -438,9 +633,12 @@ export default function App() {
   const [systemStatus, setSystemStatus] = useState<'nominal' | 'low' | 'medium' | 'high' | 'critical'>('nominal');
   const [lastDetection, setLastDetection] = useState<string | null>(null);
   const [isAiProcessing, setIsAiProcessing] = useState(false);
-  const [activeTab, setActiveTab] = useState<'feed' | 'map' | 'logs' | 'personnel'>('feed');
+  const [activeTab, setActiveTab] = useState<'feed' | 'map' | 'logs' | 'personnel' | 'comms'>('feed');
   const [visionMode, setVisionMode] = useState<'normal' | 'thermal' | 'night'>('normal');
   const [showTacticalOverlay, setShowTacticalOverlay] = useState(true);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [isSpeakerEnabled, setIsSpeakerEnabled] = useState(true);
+  const [isRecording, setIsRecording] = useState(false);
   const [weather, setWeather] = useState<WeatherInfo>({
     temp: 14,
     condition: 'Clear',
@@ -448,6 +646,8 @@ export default function App() {
     windSpeed: 12,
     visibility: '10km'
   });
+  const [tacticalEntities, setTacticalEntities] = useState<TacticalEntity[]>([]);
+  const [currentTime, setCurrentTime] = useState(new Date());
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -472,7 +672,95 @@ export default function App() {
     setSystemLogs(prev => [newLog, ...prev].slice(0, 100));
   };
 
+  // Add Message Helper
+  const sendMessage = (content: string, sender: string = 'OPERATOR', type: ChatMessage['type'] = 'user', isAuto: boolean = false) => {
+    const newMessage: ChatMessage = {
+      id: Math.random().toString(36).substr(2, 9),
+      timestamp: new Date(),
+      sender,
+      content,
+      type,
+      isAutoGenerated: isAuto
+    };
+    setMessages(prev => [...prev, newMessage]);
+    
+    if (isSpeakerEnabled && isAuto && type !== 'system') {
+      const utterance = new SpeechSynthesisUtterance(content);
+      window.speechSynthesis.speak(utterance);
+    }
+
+    // AI Unit Response Logic
+    if (type === 'user' && !isAuto) {
+      const lowerContent = content.toLowerCase();
+      const keywords = ['alert', 'red', 'safe', 'suspicious', 'status', 'report'];
+      const hasKeyword = keywords.some(k => lowerContent.includes(k));
+
+      if (hasKeyword) {
+        // Delay response for realism
+        setTimeout(() => {
+          const respondingUnit = personnel[Math.floor(Math.random() * personnel.length)];
+          let responseText = '';
+
+          if (lowerContent.includes('alert') || lowerContent.includes('red')) {
+            responseText = `Copy that, Operator. This is ${respondingUnit.rank} ${respondingUnit.name}. Unit ${respondingUnit.id} is moving to high alert status. ${respondingUnit.location} is being locked down.`;
+          } else if (lowerContent.includes('safe')) {
+            responseText = `Acknowledged. ${respondingUnit.rank} ${respondingUnit.name} reporting ${respondingUnit.location} is secure. Continuing standard patrol.`;
+          } else if (lowerContent.includes('suspicious')) {
+            responseText = `Unit ${respondingUnit.id} here. ${respondingUnit.rank} ${respondingUnit.name} has visual on the suspicious activity. Engaging surveillance protocols.`;
+          } else {
+            responseText = `${respondingUnit.rank} ${respondingUnit.name} reporting in. Current status: ${respondingUnit.status.toUpperCase()} in ${respondingUnit.location}. All systems nominal.`;
+          }
+
+          const aiMessage: ChatMessage = {
+            id: Math.random().toString(36).substr(2, 9),
+            timestamp: new Date(),
+            sender: respondingUnit.name.toUpperCase(),
+            content: responseText,
+            type: 'unit',
+            isAutoGenerated: true
+          };
+          setMessages(prev => [...prev, aiMessage]);
+
+          if (isSpeakerEnabled) {
+            const utterance = new SpeechSynthesisUtterance(responseText);
+            window.speechSynthesis.speak(utterance);
+          }
+        }, 1500);
+      }
+    }
+  };
+
+  const shareLiveData = () => {
+    const data = `TACTICAL BROADCAST: ${tacticalEntities.length} entities tracked. Status: ${systemStatus.toUpperCase()}. Weather: ${weather.temp}°C ${weather.condition}.`;
+    sendMessage(data, 'SYSTEM', 'system');
+    addLog('Tactical data broadcasted to all units.', 'success');
+  };
+
   // Initialize camera
+  useEffect(() => {
+    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Fetch real weather based on location
+  useEffect(() => {
+    if (!isLoggedIn) return;
+
+    if ("geolocation" in navigator) {
+      navigator.geolocation.getCurrentPosition(async (position) => {
+        const { latitude, longitude } = position.coords;
+        setCoords({ lat: latitude, lng: longitude });
+        addLog(`Location acquired: ${latitude.toFixed(2)}, ${longitude.toFixed(2)}`, 'info');
+        const weatherData = await fetchWeather(latitude, longitude);
+        setWeather(weatherData);
+        addLog(`Weather updated for current location: ${weatherData.temp}°C, ${weatherData.condition}`, 'success');
+      }, (error) => {
+        console.error("Geolocation error:", error);
+        addLog('Failed to acquire location. Using default weather data.', 'warning');
+      });
+    }
+  }, [isLoggedIn]);
+
   useEffect(() => {
     if (!isLoggedIn) return;
     addLog('System initialized. Operator authenticated.', 'success');
@@ -496,6 +784,122 @@ export default function App() {
     };
   }, [isLoggedIn]);
 
+  // Tactical Entity Simulation
+  useEffect(() => {
+    if (!isLoggedIn || !isMonitoring) return;
+
+    // Initial entities
+    const initialEntities: TacticalEntity[] = [
+      { 
+        id: 'F01', 
+        type: 'friendly', 
+        x: 30, 
+        y: 40, 
+        label: 'UNIT_ALPHA', 
+        hasId: true, 
+        detectedBy: 'GPS',
+        movementPattern: 'steady',
+        visualCues: ['Standard Uniform', 'Authorized Gear']
+      },
+      { 
+        id: 'F02', 
+        type: 'friendly', 
+        x: 60, 
+        y: 20, 
+        label: 'UNIT_BRAVO', 
+        hasId: true, 
+        detectedBy: 'GPS',
+        movementPattern: 'steady',
+        visualCues: ['Standard Uniform', 'Authorized Gear']
+      },
+      { 
+        id: 'S01', 
+        type: 'suspicious', 
+        x: 10, 
+        y: 10, 
+        label: 'UNKNOWN_01', 
+        hasId: false, 
+        detectedBy: 'AI_VISION',
+        movementPattern: 'stealthy',
+        visualCues: ['Dark Clothing', 'Face Masked']
+      },
+    ];
+    setTacticalEntities(initialEntities);
+
+    const interval = setInterval(() => {
+      setTacticalEntities(prev => prev.map(entity => {
+        // Move entities based on pattern
+        let speed = 0.2;
+        let randomness = 0.5;
+
+        if (entity.movementPattern === 'stealthy') {
+          speed = 0.05;
+          randomness = 0.2;
+        } else if (entity.movementPattern === 'erratic') {
+          speed = 0.4;
+          randomness = 0.8;
+        } else if (entity.movementPattern === 'aggressive') {
+          speed = 0.6;
+          randomness = 0.3;
+        }
+
+        const dx = (Math.random() - randomness) * speed;
+        const dy = (Math.random() - randomness) * speed;
+        
+        return {
+          ...entity,
+          x: Math.max(0, Math.min(100, entity.x + dx)),
+          y: Math.max(0, Math.min(100, entity.y + dy))
+        };
+      }));
+
+      // Randomly spawn a new suspicious/armed person
+      if (Math.random() > 0.98) {
+        const isArmed = Math.random() > 0.7;
+        const pattern = isArmed ? 'aggressive' : (Math.random() > 0.5 ? 'stealthy' : 'erratic');
+        
+        const cues = isArmed 
+          ? ['Weapon Visible', 'Tactical Vest', 'Rapid Movement'] 
+          : ['Unidentified Gear', 'Avoiding Cameras', 'Loitering'];
+
+        const newEntity: TacticalEntity = {
+          id: 'T' + Math.random().toString(36).substr(2, 4),
+          type: isArmed ? 'armed' : 'suspicious',
+          x: Math.random() * 100,
+          y: Math.random() * 100,
+          label: isArmed ? 'ARMED_THREAT' : 'SUSPICIOUS_PERSON',
+          hasId: false,
+          detectedBy: 'AI_VISION',
+          movementPattern: pattern,
+          visualCues: cues
+        };
+        
+        setTacticalEntities(prev => [...prev, newEntity]);
+        
+        // Add alert for suspicious/armed
+        const sector = ['A', 'B', 'C'][Math.floor(Math.random() * 3)];
+        const newAlert: Alert = {
+          id: Math.random().toString(36).substr(2, 9),
+          timestamp: new Date(),
+          type: isArmed ? 'Armed Personnel' : 'Suspicious Movement',
+          description: `${isArmed ? 'Armed individual' : 'Unidentified person'} detected in Sector ${sector}. ` +
+                       `Movement: ${pattern}. Cues: ${cues.join(', ')}. No military ID detected.`,
+          severity: isArmed ? 'critical' : 'high',
+          status: 'active'
+        };
+        setAlerts(prev => [newAlert, ...prev]);
+        addLog(`AI VISION: ${newAlert.description}`, isArmed ? 'error' : 'warning');
+        setSystemStatus(isArmed ? 'critical' : 'high');
+        setLastDetection(newAlert.description);
+
+        // Automatic message to all units
+        sendMessage(`ALERT: ${newAlert.description}. All units in Sector ${sector} move to intercept.`, 'COMMAND_AI', 'system', true);
+      }
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, [isLoggedIn, isMonitoring]);
+
   // Monitoring Loop
   useEffect(() => {
     let interval: NodeJS.Timeout;
@@ -512,7 +916,7 @@ export default function App() {
             const base64Image = canvas.toDataURL('image/jpeg', 0.8);
             
             setIsAiProcessing(true);
-            const result = await analyzeFrame(base64Image);
+            const result = await analyzeFrame(base64Image, visionMode);
             setIsAiProcessing(false);
 
             if (result.isSuspicious) {
@@ -529,6 +933,33 @@ export default function App() {
               setSystemStatus(result.threatLevel);
               setLastDetection(result.description);
               addLog(`THREAT DETECTED: ${result.description}`, result.threatLevel === 'critical' ? 'error' : 'warning');
+              
+              // Automatic message to all units
+              sendMessage(`CRITICAL: ${result.description}. Immediate response required.`, 'SENTRY_AI', 'system', true);
+
+              // Add to tactical entities
+              const isArmed = result.threatLevel === 'critical' || result.detectedObjects.some(o => o.toLowerCase().includes('weapon'));
+              const newEntity: TacticalEntity = {
+                id: 'AI_' + Math.random().toString(36).substr(2, 4),
+                type: isArmed ? 'armed' : 'suspicious',
+                x: 30 + (Math.random() * 40), 
+                y: 30 + (Math.random() * 40),
+                label: isArmed ? 'AI_ARMED_THREAT' : 'AI_SUSPICIOUS_PERSON',
+                hasId: false,
+                detectedBy: 'AI_VISION',
+                movementPattern: result.movementPattern,
+                visualCues: result.visualCues,
+                temperature: result.temperature || (36.4 + Math.random() * 2.2)
+              };
+              setTacticalEntities(prev => {
+                const filtered = prev.filter(e => e.detectedBy !== 'AI_VISION' || (Date.now() - (e as any)._timestamp < 30000));
+                const aiEntities = filtered.filter(e => e.detectedBy === 'AI_VISION');
+                if (aiEntities.length >= 3) {
+                  const firstAiIndex = filtered.findIndex(e => e.detectedBy === 'AI_VISION');
+                  if (firstAiIndex !== -1) filtered.splice(firstAiIndex, 1);
+                }
+                return [...filtered, { ...newEntity, _timestamp: Date.now() } as any];
+              });
             } else {
               setSystemStatus('nominal');
             }
@@ -538,6 +969,27 @@ export default function App() {
     }
     return () => clearInterval(interval);
   }, [isMonitoring, isAiProcessing, isLoggedIn]);
+
+  const [coords, setCoords] = useState({ lat: 32.7266, lng: 74.8570 });
+
+  // Get real location on mount
+  useEffect(() => {
+    if ("geolocation" in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          setCoords({
+            lat: position.coords.latitude,
+            lng: position.coords.longitude
+          });
+          addLog('GPS signal locked. Coordinates synchronized.', 'info');
+        },
+        (error) => {
+          console.error("Geolocation error:", error);
+          addLog('GPS signal weak. Using fallback coordinates.', 'warning');
+        }
+      );
+    }
+  }, []);
 
   if (!isLoggedIn) {
     return <Login onLogin={() => setIsLoggedIn(true)} />;
@@ -589,6 +1041,12 @@ export default function App() {
             onClick={() => setActiveTab('personnel')}
             label="Units"
           />
+          <NavItem 
+            icon={<MessageSquare className="w-5 h-5" />} 
+            active={activeTab === 'comms'} 
+            onClick={() => setActiveTab('comms')}
+            label="Comms"
+          />
         </nav>
         <div className="mt-auto flex flex-col gap-4">
           <div className="w-10 h-10 rounded-full bg-zinc-800 flex items-center justify-center border border-sentry-border cursor-pointer hover:bg-zinc-700 transition-colors">
@@ -609,7 +1067,7 @@ export default function App() {
         <header className="h-16 border-b border-sentry-border bg-sentry-panel/50 backdrop-blur-md flex items-center justify-between px-8 z-10">
           <div className="flex items-center gap-4">
             <h1 className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
-              SECOND SENTRY <span className="text-xs font-mono text-sentry-accent px-2 py-0.5 border border-sentry-accent/30 rounded">BETA v2.4</span>
+              VISION SENTRY <span className="text-xs font-mono text-sentry-accent px-2 py-0.5 border border-sentry-accent/30 rounded">BETA v2.4</span>
             </h1>
             <div className="h-4 w-px bg-sentry-border mx-2" />
             <div className="flex items-center gap-2 text-xs font-mono">
@@ -644,6 +1102,14 @@ export default function App() {
               {isMonitoring ? 'STOP SURVEILLANCE' : 'START SURVEILLANCE'}
             </button>
             <Bell className="w-5 h-5 text-zinc-500 cursor-pointer hover:text-white transition-colors" />
+            <div 
+              onClick={() => setIsSpeakerEnabled(!isSpeakerEnabled)}
+              className={`w-10 h-10 rounded-full flex items-center justify-center border cursor-pointer transition-all ${
+                isSpeakerEnabled ? 'bg-sentry-accent/10 border-sentry-accent/20 text-sentry-accent' : 'bg-zinc-800 border-white/5 text-zinc-500'
+              }`}
+            >
+              {isSpeakerEnabled ? <Volume2 className="w-5 h-5" /> : <VolumeX className="w-5 h-5" />}
+            </div>
           </div>
         </header>
 
@@ -655,71 +1121,93 @@ export default function App() {
               {/* Main Viewport Container */}
               <div className="flex-1 flex flex-col gap-4 min-h-0">
                 <div className="flex-1 bg-black rounded-xl border border-sentry-border relative overflow-hidden group">
-                  {activeTab === 'feed' ? (
-                    <>
-                      <video 
-                        ref={videoRef} 
-                        autoPlay 
-                        muted 
-                        playsInline 
-                        className={`w-full h-full object-cover opacity-80 transition-all duration-500 ${
-                          visionMode === 'thermal' ? 'vision-thermal' : visionMode === 'night' ? 'vision-night' : ''
-                        }`}
-                      />
-                      <canvas ref={canvasRef} className="hidden" />
-                      
-                      {/* Overlays */}
-                      <div className="absolute inset-0 grid-overlay pointer-events-none" />
-                      <div className="scanline" />
-                      
-                      {/* HUD Elements */}
-                      <div className="absolute top-4 left-4 flex flex-col gap-2">
-                        <div className="bg-black/60 backdrop-blur-md px-3 py-1.5 rounded border border-white/10 flex items-center gap-2">
-                          <Eye className="w-4 h-4 text-sentry-accent" />
-                          <span className="text-xs font-mono">CAM_01_BORDER_NORTH</span>
-                        </div>
-                        <div className="bg-black/60 backdrop-blur-md px-3 py-1.5 rounded border border-white/10 flex items-center gap-2">
-                          <Zap className="w-4 h-4 text-yellow-500" />
-                          <span className="text-xs font-mono">PWR: 94%</span>
-                        </div>
+                  {/* Persistent Video/Canvas for AI Processing */}
+                  <div className={activeTab === 'feed' ? 'w-full h-full' : 'hidden'}>
+                    <video 
+                      ref={videoRef} 
+                      autoPlay 
+                      muted 
+                      playsInline 
+                      className={`w-full h-full object-cover opacity-80 transition-all duration-500 ${
+                        visionMode === 'thermal' ? 'vision-thermal' : visionMode === 'night' ? 'vision-night' : ''
+                      }`}
+                    />
+                    <canvas ref={canvasRef} className="hidden" />
+                    
+                    {/* Overlays */}
+                    <div className="absolute inset-0 grid-overlay pointer-events-none" />
+                    <div className="scanline" />
+                    
+                    {/* HUD Elements */}
+                    <div className="absolute top-4 left-4 flex flex-col gap-2">
+                      <div className="bg-black/60 backdrop-blur-md px-3 py-1.5 rounded border border-white/10 flex items-center gap-2">
+                        <Eye className="w-4 h-4 text-sentry-accent" />
+                        <span className="text-xs font-mono">CAM_01_BORDER_NORTH</span>
                       </div>
-
-                      {/* Vision Mode Controls */}
-                      <div className="absolute bottom-4 right-4 flex gap-2">
-                        <VisionButton active={visionMode === 'normal'} onClick={() => setVisionMode('normal')} label="NORMAL" />
-                        <VisionButton active={visionMode === 'thermal'} onClick={() => setVisionMode('thermal')} label="THERMAL" />
-                        <VisionButton active={visionMode === 'night'} onClick={() => setVisionMode('night')} label="NIGHT" />
-                        <div className="w-px bg-white/10 mx-1" />
-                        <VisionButton active={showTacticalOverlay} onClick={() => setShowTacticalOverlay(!showTacticalOverlay)} label="AI_HUD" />
+                      <div className="bg-black/60 backdrop-blur-md px-3 py-1.5 rounded border border-white/10 flex items-center gap-2">
+                        <Zap className="w-4 h-4 text-yellow-500" />
+                        <span className="text-xs font-mono">PWR: 94%</span>
                       </div>
+                    </div>
 
-                      {/* Tactical Overlay (Simulated Bounding Boxes) */}
-                      {showTacticalOverlay && systemStatus !== 'nominal' && (
-                        <div className="absolute inset-0 pointer-events-none">
+                    {/* Vision Mode Controls */}
+                    <div className="absolute bottom-4 right-4 flex gap-2">
+                      <VisionButton active={visionMode === 'normal'} onClick={() => setVisionMode('normal')} label="NORMAL" />
+                      <VisionButton active={visionMode === 'thermal'} onClick={() => setVisionMode('thermal')} label="THERMAL" />
+                      <VisionButton active={visionMode === 'night'} onClick={() => setVisionMode('night')} label="NIGHT" />
+                      <div className="w-px bg-white/10 mx-1" />
+                      <VisionButton active={showTacticalOverlay} onClick={() => setShowTacticalOverlay(!showTacticalOverlay)} label="AI_HUD" />
+                    </div>
+
+                    {/* Tactical Overlay (Dynamic Bounding Boxes) */}
+                    {showTacticalOverlay && (
+                      <div className="absolute inset-0 pointer-events-none">
+                        {tacticalEntities.filter(e => e.detectedBy === 'AI_VISION').map(entity => (
                           <motion.div 
+                            key={entity.id}
                             initial={{ opacity: 0 }}
-                            animate={{ opacity: [0, 1, 0.8, 1] }}
-                            className="absolute border-2 border-red-500 shadow-[0_0_15px_rgba(239,68,68,0.5)]"
-                            style={{ top: '30%', left: '40%', width: '15%', height: '25%' }}
+                            animate={{ opacity: 1 }}
+                            className={`absolute border-2 transition-colors duration-500 ${
+                              visionMode === 'thermal' ? 'border-white' : 'border-red-500 shadow-[0_0_15px_rgba(239,68,68,0.5)]'
+                            }`}
+                            style={{ 
+                              top: `${entity.y}%`, 
+                              left: `${entity.x}%`, 
+                              width: '15%', 
+                              height: '25%',
+                              transform: 'translate(-50%, -50%)'
+                            }}
                           >
-                            <div className="absolute -top-6 left-0 bg-red-500 text-white text-[8px] font-black px-1.5 py-0.5 uppercase flex items-center gap-1">
-                              <Target className="w-2 h-2" />
-                              UNAUTHORIZED_ENTRY
+                            <div className={`absolute -top-6 left-0 ${
+                              visionMode === 'thermal' ? 'text-white font-bold' : 'bg-red-500 text-white'
+                            } text-[10px] font-black px-1.5 py-0.5 uppercase flex items-center gap-1`}>
+                              {visionMode === 'thermal' ? (
+                                <span className="drop-shadow-md">{entity.temperature?.toFixed(1)} °C</span>
+                              ) : (
+                                <>
+                                  <Target className="w-2.5 h-2.5" />
+                                  {entity.label}
+                                </>
+                              )}
                             </div>
-                            <div className="absolute -bottom-6 right-0 text-red-500 text-[8px] font-mono font-bold">
-                              CONF: 98.4%
-                            </div>
+                            {visionMode !== 'thermal' && (
+                              <div className="absolute -bottom-6 right-0 text-red-500 text-[8px] font-mono font-bold">
+                                CONF: {(90 + Math.random() * 9).toFixed(1)}%
+                              </div>
+                            )}
                             {/* Corner brackets */}
                             <div className="absolute top-0 left-0 w-2 h-2 border-t-2 border-l-2 border-white" />
                             <div className="absolute top-0 right-0 w-2 h-2 border-t-2 border-r-2 border-white" />
                             <div className="absolute bottom-0 left-0 w-2 h-2 border-b-2 border-l-2 border-white" />
                             <div className="absolute bottom-0 right-0 w-2 h-2 border-b-2 border-r-2 border-white" />
                           </motion.div>
-                        </div>
-                      )}
-                    </>
-                  ) : activeTab === 'map' ? (
-                    <LiveMap alerts={alerts} />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {activeTab === 'map' ? (
+                    <LiveMap alerts={alerts} coords={coords} entities={tacticalEntities} />
                   ) : activeTab === 'logs' ? (
                     <div className="w-full h-full bg-zinc-900 p-6 overflow-y-auto custom-scrollbar">
                       <h2 className="text-xl font-black text-white tracking-widest uppercase mb-6 flex items-center gap-3">
@@ -738,6 +1226,15 @@ export default function App() {
                         ))}
                       </div>
                     </div>
+                  ) : activeTab === 'comms' ? (
+                    <CommsCenter 
+                      messages={messages} 
+                      onSendMessage={(content) => sendMessage(content)} 
+                      onShareData={shareLiveData}
+                      isRecording={isRecording}
+                      setIsRecording={setIsRecording}
+                      currentTime={currentTime}
+                    />
                   ) : (
                     <div className="w-full h-full bg-zinc-900 p-6 overflow-y-auto custom-scrollbar">
                       <h2 className="text-xl font-black text-white tracking-widest uppercase mb-6 flex items-center gap-3">
@@ -745,6 +1242,7 @@ export default function App() {
                         Personnel Deployment
                       </h2>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {/* Static Personnel */}
                         {personnel.map(p => (
                           <div key={p.id} className="p-4 rounded-xl bg-black/40 border border-white/5 flex items-center gap-4">
                             <div className="w-12 h-12 rounded-full bg-zinc-800 flex items-center justify-center border border-sentry-border">
@@ -762,16 +1260,34 @@ export default function App() {
                             </div>
                           </div>
                         ))}
+                        {/* Real-time Tactical Units */}
+                        {tacticalEntities.filter(e => e.type === 'friendly').map(e => (
+                          <div key={e.id} className="p-4 rounded-xl bg-blue-900/10 border border-blue-500/20 flex items-center gap-4">
+                            <div className="w-12 h-12 rounded-full bg-blue-500/10 flex items-center justify-center border border-blue-500/30">
+                              <User className="w-6 h-6 text-blue-400" />
+                            </div>
+                            <div>
+                              <h3 className="text-sm font-bold text-white">{e.label}</h3>
+                              <p className="text-[10px] font-mono text-zinc-500 uppercase">Tactical Unit | GPS Active</p>
+                              <div className="flex items-center gap-2 mt-1">
+                                <div className="w-1.5 h-1.5 rounded-full bg-sentry-success animate-pulse" />
+                                <span className="text-[9px] font-bold uppercase tracking-widest text-sentry-success">In Field</span>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
                       </div>
                     </div>
                   )}
 
                   {/* Common HUD Elements */}
-                  <div className="absolute top-4 right-4 bg-black/60 backdrop-blur-md px-3 py-1.5 rounded border border-white/10">
-                    <span className="text-xs font-mono text-white">
-                      {new Date().toLocaleTimeString()} | {new Date().toLocaleDateString()}
-                    </span>
-                  </div>
+                  {activeTab !== 'comms' && (
+                    <div className="absolute top-4 right-4 bg-black/60 backdrop-blur-md px-3 py-1.5 rounded border border-white/10 z-50">
+                      <span className="text-xs font-mono text-white">
+                        {currentTime.toLocaleTimeString()} | {currentTime.toLocaleDateString()}
+                      </span>
+                    </div>
+                  )}
 
                   {/* Corner Accents */}
                   <div className="absolute top-0 left-0 w-8 h-8 border-t-2 border-l-2 border-sentry-accent/50 m-2" />
@@ -891,21 +1407,49 @@ export default function App() {
 
               {/* Comms Panel */}
               <div className="h-48 flex flex-col bg-sentry-panel rounded-xl border border-sentry-border overflow-hidden">
-                <div className="p-3 border-b border-sentry-border bg-black/20 flex items-center gap-2">
-                  <MessageSquare className="w-3.5 h-3.5 text-sentry-accent" />
-                  <span className="text-[10px] font-bold uppercase tracking-widest">Tactical Comms</span>
+                <div className="p-3 border-b border-sentry-border bg-black/20 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <MessageSquare className="w-3.5 h-3.5 text-sentry-accent" />
+                    <span className="text-[10px] font-bold uppercase tracking-widest">Tactical Comms</span>
+                  </div>
+                  <button 
+                    onClick={() => setActiveTab('comms')}
+                    className="text-[8px] font-bold text-sentry-accent hover:underline uppercase"
+                  >
+                    Open Center
+                  </button>
                 </div>
                 <div className="flex-1 p-3 overflow-y-auto space-y-2 custom-scrollbar">
-                  <CommsMessage user="HQ" text="Sentry-1, confirm status." time="13:42" />
-                  <CommsMessage user="OPERATOR" text="Status nominal. Monitoring sector A-7." time="13:43" />
-                  <CommsMessage user="HQ" text="Copy. Drone-01 is on station." time="13:45" />
+                  {messages.length === 0 ? (
+                    <p className="text-[9px] text-zinc-600 text-center mt-4">No recent transmissions</p>
+                  ) : (
+                    messages.slice(-5).map(msg => (
+                      <div key={msg.id}>
+                        <CommsMessage 
+                          user={msg.sender} 
+                          text={msg.content} 
+                          time={msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} 
+                        />
+                      </div>
+                    ))
+                  )}
                 </div>
                 <div className="p-2 border-t border-sentry-border bg-black/20">
-                  <input 
-                    type="text" 
-                    placeholder="Send message..." 
-                    className="w-full bg-zinc-900 border border-white/5 rounded px-2 py-1 text-[10px] focus:outline-none focus:border-sentry-accent"
-                  />
+                  <form onSubmit={(e) => {
+                    e.preventDefault();
+                    const input = (e.target as any).elements.msg;
+                    if (input.value.trim()) {
+                      sendMessage(input.value);
+                      input.value = '';
+                    }
+                  }}>
+                    <input 
+                      name="msg"
+                      type="text" 
+                      placeholder="Send message..." 
+                      className="w-full bg-zinc-900 border border-white/5 rounded px-2 py-1 text-[10px] focus:outline-none focus:border-sentry-accent"
+                    />
+                  </form>
                 </div>
               </div>
             </div>
@@ -914,13 +1458,167 @@ export default function App() {
           {/* Bottom Stats Row */}
           <div className="h-24 flex gap-4">
             <StatCard label="UPTIME" value="142:12:05" icon={<Activity className="w-4 h-4" />} />
-            <StatCard label="THREATS DETECTED" value={alerts.length.toString()} icon={<Shield className="w-4 h-4" />} />
+            <StatCard 
+              label="THREATS DETECTED" 
+              value={tacticalEntities.filter(e => e.type !== 'friendly').length.toString()} 
+              icon={<Shield className="w-4 h-4" />} 
+              trend={tacticalEntities.some(e => e.type === 'armed') ? 'critical' : undefined}
+            />
             <StatCard label="RANGE SCAN" value="50 KM" icon={<Navigation className="w-4 h-4" />} />
             <StatCard label="OPERATOR" value="OFFICER_58" icon={<User className="w-4 h-4" />} />
             <StatCard label="AI DIAGNOSTICS" value="OPTIMAL" icon={<Cpu className="w-4 h-4" />} />
           </div>
         </div>
       </main>
+    </div>
+  );
+}
+
+// --- Comms Center Component ---
+function CommsCenter({ 
+  messages, 
+  onSendMessage, 
+  onShareData, 
+  isRecording, 
+  setIsRecording,
+  currentTime
+}: { 
+  messages: ChatMessage[], 
+  onSendMessage: (content: string) => void, 
+  onShareData: () => void,
+  isRecording: boolean,
+  setIsRecording: (val: boolean) => void,
+  currentTime: Date
+}) {
+  const [input, setInput] = useState('');
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const recognitionRef = useRef<any>(null);
+
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages]);
+
+  useEffect(() => {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (SpeechRecognition) {
+      recognitionRef.current = new SpeechRecognition();
+      recognitionRef.current.continuous = false;
+      recognitionRef.current.interimResults = false;
+
+      recognitionRef.current.onresult = (event: any) => {
+        const transcript = event.results[0][0].transcript;
+        setInput(prev => prev + (prev ? ' ' : '') + transcript);
+        setIsRecording(false);
+      };
+
+      recognitionRef.current.onerror = (event: any) => {
+        console.error('Speech recognition error', event.error);
+        setIsRecording(false);
+      };
+
+      recognitionRef.current.onend = () => {
+        setIsRecording(false);
+      };
+    }
+  }, []);
+
+  const toggleRecording = () => {
+    if (isRecording) {
+      recognitionRef.current?.stop();
+    } else {
+      recognitionRef.current?.start();
+      setIsRecording(true);
+    }
+  };
+
+  const handleSend = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (input.trim()) {
+      onSendMessage(input);
+      setInput('');
+    }
+  };
+
+  return (
+    <div className="w-full h-full bg-zinc-900 flex flex-col overflow-hidden">
+      <div className="p-6 border-b border-white/5 flex justify-between items-center">
+        <h2 className="text-xl font-black text-white tracking-widest uppercase flex items-center gap-3">
+          <MessageSquare className="w-6 h-6 text-sentry-accent" />
+          Comms Center
+        </h2>
+        <div className="flex gap-3 items-center">
+          <div className="bg-black/40 px-3 py-1.5 rounded border border-white/10 mr-2">
+            <span className="text-[10px] font-mono text-white">
+              {currentTime.toLocaleTimeString()} | {currentTime.toLocaleDateString()}
+            </span>
+          </div>
+          <button 
+            onClick={onShareData}
+            className="flex items-center gap-2 px-3 py-1.5 bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/30 rounded-lg text-[10px] font-bold uppercase tracking-widest transition-colors text-blue-400"
+          >
+            <Share2 className="w-3.5 h-3.5" />
+            Broadcast Tactical Data
+          </button>
+        </div>
+      </div>
+      
+      <div ref={scrollRef} className="flex-1 overflow-y-auto p-6 space-y-4 custom-scrollbar">
+        {messages.length === 0 && (
+          <div className="h-full flex flex-col items-center justify-center text-zinc-600 opacity-50">
+            <Radio className="w-12 h-12 mb-4" />
+            <p className="text-xs font-bold uppercase tracking-widest">Secure Channel Active</p>
+            <p className="text-[10px] mt-1">Waiting for transmission...</p>
+          </div>
+        )}
+        {messages.map(msg => (
+          <div key={msg.id} className={`flex flex-col ${msg.type === 'user' ? 'items-end' : 'items-start'}`}>
+            <div className="flex items-center gap-2 mb-1 px-1">
+              <span className={`text-[9px] font-black uppercase tracking-widest ${
+                msg.type === 'user' ? 'text-blue-400' : msg.type === 'unit' ? 'text-emerald-400' : 'text-red-400'
+              }`}>{msg.sender}</span>
+              <span className="text-[8px] font-mono text-zinc-600">{msg.timestamp.toLocaleTimeString()}</span>
+            </div>
+            <div className={`max-w-[80%] p-3 rounded-2xl text-sm ${
+              msg.type === 'user' 
+                ? 'bg-sentry-accent text-white rounded-tr-none' 
+                : msg.type === 'system' 
+                  ? 'bg-red-500/10 border border-red-500/20 text-red-400 rounded-tl-none'
+                  : 'bg-zinc-800 text-zinc-300 rounded-tl-none border border-white/5'
+            }`}>
+              {msg.content}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <form onSubmit={handleSend} className="p-4 bg-black/40 border-t border-white/5 flex gap-3">
+        <button 
+          type="button"
+          onClick={toggleRecording}
+          className={`w-12 h-12 rounded-xl flex items-center justify-center transition-all border ${
+            isRecording 
+              ? 'bg-red-600 border-red-500 animate-pulse text-white' 
+              : 'bg-zinc-800 border-white/5 text-zinc-400 hover:text-white hover:bg-zinc-700'
+          }`}
+        >
+          {isRecording ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+        </button>
+        <input 
+          type="text"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          placeholder={isRecording ? "Listening..." : "Enter message to all units..."}
+          className="flex-1 bg-zinc-800 border border-white/5 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-sentry-accent/50 transition-all"
+        />
+        <button 
+          type="submit"
+          className="w-12 h-12 bg-sentry-accent hover:bg-blue-600 rounded-xl flex items-center justify-center transition-all shadow-lg shadow-blue-600/20"
+        >
+          <Send className="w-5 h-5 text-white" />
+        </button>
+      </form>
     </div>
   );
 }
@@ -972,14 +1670,23 @@ function NavItem({ icon, active = false, onClick, label }: { icon: React.ReactNo
   );
 }
 
-function StatCard({ label, value, icon }: { label: string, value: string, icon: React.ReactNode }) {
+function StatCard({ label, value, icon, trend }: { label: string, value: string, icon: React.ReactNode, trend?: 'critical' }) {
   return (
-    <div className="flex-1 bg-sentry-panel rounded-xl border border-sentry-border p-4 flex flex-col justify-between group hover:border-sentry-accent/50 transition-colors">
-      <div className="flex items-center justify-between text-zinc-500 group-hover:text-sentry-accent transition-colors">
+    <div className={`flex-1 bg-sentry-panel rounded-xl border p-4 flex flex-col justify-between group transition-all ${
+      trend === 'critical' ? 'border-red-500/50 bg-red-500/5' : 'border-sentry-border hover:border-sentry-accent/50'
+    }`}>
+      <div className={`flex items-center justify-between transition-colors ${
+        trend === 'critical' ? 'text-red-500' : 'text-zinc-500 group-hover:text-sentry-accent'
+      }`}>
         <span className="text-[10px] font-bold uppercase tracking-widest">{label}</span>
         {icon}
       </div>
-      <div className="text-xl font-mono font-bold text-white truncate">{value}</div>
+      <div className="flex items-end gap-2">
+        <span className={`text-xl font-mono font-bold truncate ${trend === 'critical' ? 'text-red-500' : 'text-white'}`}>{value}</span>
+        {trend === 'critical' && (
+          <div className="w-2 h-2 rounded-full bg-red-500 animate-ping mb-1" />
+        )}
+      </div>
     </div>
   );
 }

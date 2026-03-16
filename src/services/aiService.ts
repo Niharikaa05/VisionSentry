@@ -3,15 +3,21 @@ import { DetectionResult } from "../types";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 
-export async function analyzeFrame(base64Image: string): Promise<DetectionResult> {
+export async function analyzeFrame(base64Image: string, visionMode: string = 'normal'): Promise<DetectionResult> {
   try {
+    const visionContext = visionMode === 'thermal' 
+      ? "NOTE: The operator is using THERMAL VISION. Analyze for heat signatures and thermal anomalies. Brighter spots typically indicate human body heat."
+      : visionMode === 'night'
+      ? "NOTE: The operator is using NIGHT VISION. Analyze for movement and silhouettes in low-light conditions."
+      : "The operator is using STANDARD OPTICAL VISION.";
+
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
       contents: [
         {
           parts: [
             {
-              text: `You are an advanced border surveillance AI. Analyze this camera frame for suspicious activity.
+              text: `You are an advanced border surveillance AI. ${visionContext} Analyze this camera frame for suspicious activity.
               
               CRITICAL RULES:
               1. IGNORE: Personnel in proper Indian Army uniforms (friendly forces).
@@ -25,7 +31,10 @@ export async function analyzeFrame(base64Image: string): Promise<DetectionResult
                 "isSuspicious": boolean,
                 "threatLevel": "low" | "medium" | "high" | "critical",
                 "description": "brief explanation of what was found",
-                "detectedObjects": ["list", "of", "relevant", "objects"]
+                "detectedObjects": ["list", "of", "relevant", "objects"],
+                "visualCues": ["specific", "visual", "indicators"],
+                "movementPattern": "steady" | "erratic" | "stealthy" | "aggressive",
+                "temperature": number (estimated body temperature in Celsius, e.g., 36.8)
               }`
             },
             {
@@ -47,7 +56,10 @@ export async function analyzeFrame(base64Image: string): Promise<DetectionResult
       isSuspicious: result.isSuspicious ?? false,
       threatLevel: result.threatLevel ?? 'low',
       description: result.description ?? "No suspicious activity detected.",
-      detectedObjects: result.detectedObjects ?? []
+      detectedObjects: result.detectedObjects ?? [],
+      visualCues: result.visualCues ?? [],
+      movementPattern: result.movementPattern ?? 'steady',
+      temperature: result.temperature
     };
   } catch (error) {
     console.error("AI Analysis Error:", error);

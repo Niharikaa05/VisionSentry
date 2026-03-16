@@ -43,9 +43,17 @@
 }
 
 .vision-thermal {
-  filter: contrast(1.5) brightness(1.2) hue-rotate(180deg) saturate(2);
-  background: linear-gradient(to right, #0000ff, #ff0000);
-  mix-blend-mode: screen;
+  filter: grayscale(1) invert(1) sepia(1) hue-rotate(180deg) saturate(15) contrast(1.6) brightness(1.1);
+  position: relative;
+}
+
+.vision-thermal::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.05) 0%, rgba(0, 0, 255, 0.1) 100%);
+  pointer-events: none;
+  mix-blend-mode: overlay;
 }
 
 .vision-night {
