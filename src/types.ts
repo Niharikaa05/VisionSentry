@@ -14,7 +14,12 @@ export interface DetectionResult {
   isSuspicious: boolean;
   threatLevel: AlertSeverity;
   description: string;
-  detectedObjects: string[];
+  detectedObjects: {
+    label: string;
+    x: number;
+    y: number;
+    type: 'friendly' | 'suspicious' | 'armed';
+  }[];
   visualCues?: string[];
   movementPattern?: 'steady' | 'erratic' | 'stealthy' | 'aggressive';
   temperature?: number;
@@ -31,8 +36,10 @@ export interface Personnel {
   id: string;
   name: string;
   rank: string;
-  status: 'active' | 'on-leave' | 'deployed';
-  location: string;
+  clearance: 'LEVEL_1' | 'LEVEL_2' | 'LEVEL_3' | 'LEVEL_4' | 'LEVEL_5';
+  status: 'ACTIVE' | 'OFF_DUTY' | 'DEPLOYED' | 'INACTIVE';
+  lastSeen?: string;
+  photo?: string;
 }
 
 export interface WeatherInfo {

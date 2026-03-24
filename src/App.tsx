@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
+import { io, Socket } from 'socket.io-client';
 import { 
   Shield, 
   AlertTriangle, 
@@ -35,56 +36,97 @@ import {
   Database,
   Radio,
   Target,
-  Zap
+  Zap,
+  Gamepad2,
+  X,
+  Video,
+  ChevronRight,
+  ChevronLeft,
+  Maximize2,
+  Minimize2
 } from 'lucide-react';
+import { GoogleGenAI, GenerateContentResponse, Modality } from "@google/genai";
 import { motion, AnimatePresence } from 'motion/react';
+import { MapContainer, TileLayer, Marker, Popup, Circle, Polyline, useMap } from 'react-leaflet';
+import L from 'leaflet';
 import { Alert, AlertSeverity, SystemLog, Personnel, WeatherInfo, TacticalEntity, ChatMessage } from './types';
 import { analyzeFrame } from './services/aiService';
 import { fetchWeather } from './services/weatherService';
 
+// Fix for default marker icons in Leaflet
+// @ts-ignore
+import markerIcon2x from 'leaflet/dist/images/marker-icon-2x.png';
+// @ts-ignore
+import markerIcon from 'leaflet/dist/images/marker-icon.png';
+// @ts-ignore
+import markerShadow from 'leaflet/dist/images/marker-shadow.png';
+
+delete (L.Icon.Default.prototype as any)._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: markerIcon2x,
+  iconUrl: markerIcon,
+  shadowUrl: markerShadow,
+});
+
+// --- Error Boundary ---
+class ErrorBoundary extends React.Component<any, any> {
+  state = { hasError: false, error: null };
+  constructor(props: any) {
+    super(props);
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    console.error("ErrorBoundary caught an error", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="min-h-screen bg-black flex items-center justify-center p-8">
+          <div className="max-w-md w-full bg-zinc-900 border border-red-500/20 rounded-2xl p-8 text-center">
+            <AlertTriangle className="w-12 h-12 text-red-500 mx-auto mb-4" />
+            <h2 className="text-xl font-bold text-white mb-2">System Critical Error</h2>
+            <p className="text-zinc-400 text-sm mb-6">The surveillance terminal encountered an unrecoverable error. Please restart the system.</p>
+            <button 
+              onClick={() => window.location.reload()}
+              className="px-6 py-2 bg-red-600 text-white rounded-lg font-bold text-xs uppercase tracking-widest hover:bg-red-500 transition-colors"
+            >
+              Reboot System
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    return (this as any).props.children;
+  }
+}
+
 // --- Login Component ---
-function Login({ onLogin }: { onLogin: () => void }) {
-  const [username, setUsername] = useState('');
+function Login({ onLogin }: { onLogin: (name: string) => void }) {
+  const [systemId, setSystemId] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
-  const [attempts, setAttempts] = useState(0);
-  const [lockoutUntil, setLockoutUntil] = useState<number | null>(null);
-  const [timeLeft, setTimeLeft] = useState(0);
+  const [isConnecting, setIsConnecting] = useState(false);
 
-  useEffect(() => {
-    let timer: NodeJS.Timeout;
-    if (lockoutUntil) {
-      timer = setInterval(() => {
-        const remaining = Math.max(0, Math.ceil((lockoutUntil - Date.now()) / 1000));
-        setTimeLeft(remaining);
-        if (remaining === 0) {
-          setLockoutUntil(null);
-          setAttempts(0);
-          setError('');
-        }
-      }, 1000);
-    }
-    return () => clearInterval(timer);
-  }, [lockoutUntil]);
-
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleManualLogin = (e: React.FormEvent) => {
     e.preventDefault();
-    if (lockoutUntil) return;
-
-    if (username === 'admin' && password === 'sentry2026') {
-      onLogin();
-    } else {
-      const newAttempts = attempts + 1;
-      setAttempts(newAttempts);
-      if (newAttempts >= 3) {
-        const lockTime = Date.now() + 60000;
-        setLockoutUntil(lockTime);
-        setTimeLeft(60);
-        setError('TERMINAL LOCKED: Security breach protocol active.');
+    setIsConnecting(true);
+    setError('');
+    
+    // Simulate a small delay for "system verification"
+    setTimeout(() => {
+      if (systemId && password) {
+        onLogin(systemId);
       } else {
-        setError(`Access Denied. ${3 - newAttempts} attempts remaining.`);
+        setError('INVALID_CREDENTIALS: ACCESS_DENIED');
+        setIsConnecting(false);
       }
-    }
+    }, 800);
   };
 
   return (
@@ -98,9 +140,9 @@ function Login({ onLogin }: { onLogin: () => void }) {
         animate={{ opacity: 1, y: 0 }}
         className="w-full max-w-[440px] z-10"
       >
-        <div className="bg-[#111114] border border-white/5 rounded-2xl shadow-2xl overflow-hidden">
+        <div className="bg-[#111114] border border-white/5 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
           {/* Header */}
-          <div className="p-8 border-b border-white/5 bg-gradient-to-b from-white/[0.02] to-transparent">
+          <div className="p-8 border-b border-white/5 bg-gradient-to-b from-white/[0.02] to-transparent shrink-0">
             <div className="flex items-center gap-4 mb-6">
               <div className="w-12 h-12 bg-blue-600 rounded-xl flex items-center justify-center shadow-lg shadow-blue-600/20">
                 <Shield className="w-6 h-6 text-white" />
@@ -111,75 +153,93 @@ function Login({ onLogin }: { onLogin: () => void }) {
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <div className={`w-1.5 h-1.5 rounded-full ${lockoutUntil ? 'bg-red-500 animate-pulse' : 'bg-emerald-500'}`} />
+              <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
               <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">
-                {lockoutUntil ? 'System Lockdown Active' : 'Terminal Status: Ready'}
+                Terminal Status: Ready
               </span>
             </div>
           </div>
 
-          {/* Form */}
-          <form onSubmit={handleSubmit} className="p-8 space-y-6">
-            <div className="space-y-2">
-              <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest ml-1">Operator ID</label>
-              <div className="relative group">
-                <User className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-600 group-focus-within:text-blue-500 transition-colors" />
-                <input 
-                  type="text" 
-                  disabled={!!lockoutUntil}
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  className="w-full bg-black/40 border border-white/5 rounded-xl py-3.5 pl-11 pr-4 text-sm text-white focus:outline-none focus:border-blue-500/50 transition-all placeholder:text-zinc-700"
-                  placeholder="Enter Operator ID"
-                />
-              </div>
+          {/* Body */}
+          <div className="p-8 space-y-6 overflow-y-auto custom-scrollbar">
+            <div className="p-4 bg-blue-500/5 border border-blue-500/10 rounded-xl">
+              <p className="text-xs text-zinc-400 font-medium leading-relaxed">
+                <span className="text-blue-500 font-bold uppercase tracking-widest mr-2">Notice:</span> 
+                Access to this terminal is restricted to authorized personnel only. All activities are monitored and logged.
+              </p>
             </div>
 
-            <div className="space-y-2">
-              <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest ml-1">Security Key</label>
-              <div className="relative group">
-                <Key className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-600 group-focus-within:text-blue-500 transition-colors" />
-                <input 
-                  type="password" 
-                  disabled={!!lockoutUntil}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="w-full bg-black/40 border border-white/5 rounded-xl py-3.5 pl-11 pr-4 text-sm text-white focus:outline-none focus:border-blue-500/50 transition-all placeholder:text-zinc-700"
-                  placeholder="••••••••••••"
-                />
+            <div className="space-y-6">
+              <div className="p-4 bg-blue-500/5 border border-blue-500/10 rounded-xl text-center">
+                <p className="text-[10px] font-bold text-blue-500 uppercase tracking-widest mb-2">Protocol Step 01</p>
+                <p className="text-xs text-white font-medium">Operator Terminal Access</p>
               </div>
+              <form onSubmit={handleManualLogin} className="space-y-4">
+                <div className="space-y-2">
+                  <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest ml-1">System ID</label>
+                  <div className="relative">
+                    <User className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-600" />
+                    <input 
+                      type="text"
+                      value={systemId}
+                      onChange={(e) => setSystemId(e.target.value)}
+                      placeholder="OPERATOR_ID"
+                      className="w-full bg-black/40 border border-white/5 rounded-xl py-3 pl-12 pr-4 text-sm text-white placeholder:text-zinc-700 focus:outline-none focus:border-blue-500/50 transition-colors"
+                      required
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest ml-1">Access Key</label>
+                  <div className="relative">
+                    <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-600" />
+                    <input 
+                      type="password"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder="••••••••"
+                      className="w-full bg-black/40 border border-white/5 rounded-xl py-3 pl-12 pr-4 text-sm text-white placeholder:text-zinc-700 focus:outline-none focus:border-blue-500/50 transition-colors"
+                      required
+                    />
+                  </div>
+                </div>
+
+                {error && (
+                  <motion.div 
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: 'auto' }}
+                    className="p-3 bg-red-500/10 border border-red-500/20 rounded-xl flex items-center gap-3 overflow-hidden"
+                  >
+                    <AlertTriangle className="w-4 h-4 text-red-500 shrink-0" />
+                    <p className="text-[10px] font-bold text-red-500 uppercase tracking-widest">{error}</p>
+                  </motion.div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={isConnecting}
+                  className="w-full py-4 bg-blue-600 text-white font-black uppercase tracking-widest text-xs rounded-xl hover:bg-blue-500 transition-all flex items-center justify-center gap-3 disabled:opacity-50 shadow-lg shadow-blue-600/20"
+                >
+                  {isConnecting ? (
+                    <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin" />
+                  ) : (
+                    <>
+                      <Wifi className="w-4 h-4" />
+                      Establish Connection
+                    </>
+                  )}
+                </button>
+              </form>
             </div>
 
-            {error && (
-              <motion.div 
-                initial={{ opacity: 0, y: -10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className={`p-3 rounded-lg border text-[11px] font-medium flex items-center gap-2 ${
-                  lockoutUntil ? 'bg-red-500/10 border-red-500/20 text-red-500' : 'bg-orange-500/10 border-orange-500/20 text-orange-500'
-                }`}
-              >
-                <AlertTriangle className="w-4 h-4" />
-                {error}
-              </motion.div>
-            )}
-
-            <button 
-              type="submit"
-              disabled={!!lockoutUntil}
-              className={`w-full py-4 rounded-xl font-bold text-xs uppercase tracking-[0.2em] transition-all ${
-                lockoutUntil 
-                  ? 'bg-zinc-800 text-zinc-600 cursor-not-allowed' 
-                  : 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-600/20 active:scale-[0.98]'
-              }`}
-            >
-              {lockoutUntil ? `Locked: ${timeLeft}s` : 'Authenticate'}
-            </button>
-          </form>
-
-          {/* Footer */}
-          <div className="px-8 py-6 bg-black/20 border-t border-white/5 flex justify-between items-center">
-            <span className="text-[9px] font-mono text-zinc-600 uppercase tracking-widest">Node: Border_Alpha_1</span>
-            <span className="text-[9px] font-mono text-zinc-600 uppercase tracking-widest">v2.4.0-Stable</span>
+            <div className="flex items-center justify-between pt-4 border-t border-white/5">
+              <div className="flex items-center gap-2">
+                <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+                <span className="text-[8px] font-bold text-zinc-500 uppercase tracking-widest">Secure Server Online</span>
+              </div>
+              <span className="text-[8px] font-bold text-zinc-600 uppercase tracking-widest">Region: ASIA-EAST-1</span>
+            </div>
           </div>
         </div>
         <p className="text-center mt-8 text-zinc-600 text-[10px] uppercase tracking-[0.3em] font-medium">
@@ -189,100 +249,191 @@ function Login({ onLogin }: { onLogin: () => void }) {
     </div>
   );
 }
-
 // --- Constants for Map ---
-const SECTOR_DEFINITIONS = [
-  { id: 'SEC_ALPHA', name: 'Sector Alpha', points: '20,10 40,5 60,15 50,30 30,25' },
-  { id: 'SEC_BRAVO', name: 'Sector Bravo', points: '70,40 90,35 95,60 75,65 65,50' },
-  { id: 'SEC_CHARLIE', name: 'Sector Charlie', points: '10,60 30,55 40,80 20,90 5,75' },
-];
-
 const PATROL_ROUTES = [
-  { id: 'R1', name: 'Alpha Route', path: '10,10 30,20 50,10 70,20 90,10', color: 'rgba(255, 255, 255, 0.2)' },
-  { id: 'R2', name: 'Bravo Route', path: '10,90 30,70 50,90 70,70 90,90', color: 'rgba(255, 255, 255, 0.2)' },
+  { id: 'R1', name: 'Route 01', path: '10,10 30,20 50,10 70,20 90,10', color: 'rgba(255, 255, 255, 0.2)' },
+  { id: 'R2', name: 'Route 02', path: '10,90 30,70 50,90 70,70 90,90', color: 'rgba(255, 255, 255, 0.2)' },
 ];
 
 // --- Live Map Component ---
-function LiveMap({ alerts, coords, entities }: { alerts: Alert[], coords: { lat: number, lng: number }, entities: TacticalEntity[] }) {
+function ControlButton({ label, active, onClick }: { label: string, active: boolean, onClick: () => void }) {
+  return (
+    <button 
+      onClick={onClick}
+      className={`w-8 h-8 flex items-center justify-center rounded border text-[10px] font-black transition-all ${
+        active 
+          ? 'bg-orange-500 border-orange-500 text-white shadow-lg shadow-orange-500/20' 
+          : 'bg-black/60 border-white/10 text-zinc-500 hover:text-white hover:border-white/30'
+      }`}
+    >
+      {label}
+    </button>
+  );
+}
+
+function MapUpdater({ coords }: { coords: { lat: number, lng: number } }) {
+  const map = useMap();
+  useEffect(() => {
+    map.setView([coords.lat, coords.lng], map.getZoom());
+  }, [coords, map]);
+  return null;
+}
+
+function LiveMap({ alerts, coords, entities, setAlerts, setSystemLogs, socket, selectedSector, setSelectedSector, setActiveCamera }: { 
+  alerts: Alert[], 
+  coords: { lat: number, lng: number }, 
+  entities: TacticalEntity[],
+  setAlerts: React.Dispatch<React.SetStateAction<Alert[]>>,
+  setSystemLogs: React.Dispatch<React.SetStateAction<SystemLog[]>>,
+  socket: Socket | null,
+  selectedSector: string | null,
+  setSelectedSector: (id: string | null) => void,
+  setActiveCamera: (id: string) => void
+}) {
   const [layer, setLayer] = useState<'satellite' | 'topo' | 'heat'>('satellite');
-  const [zoom, setZoom] = useState(1);
+  const [zoom, setZoom] = useState(13);
   const [dronePos, setDronePos] = useState({ x: 20, y: 20 });
-  const [droneTrail, setDroneTrail] = useState<{x: number, y: number}[]>([]);
+  const [droneHeading, setDroneHeading] = useState(45);
+  const [isManualControl, setIsManualControl] = useState(false);
+  const [activeKeys, setActiveKeys] = useState<Set<string>>(new Set());
+  const [pings, setPings] = useState<{ id: string, lat: number, lng: number }[]>([]);
+
+  const offsetCoords = (base: { lat: number, lng: number }, x: number, y: number) => {
+    const latOffset = (y - 50) * 0.0004;
+    const lngOffset = (x - 50) * 0.0004;
+    return [base.lat - latOffset, base.lng + lngOffset] as [number, number];
+  };
+
+  const sectors = [
+    { id: 'ALPHA', name: 'Sector Alpha', pos: { x: 30, y: 40 }, status: 'active', details: 'Primary observation post. High visibility. Automated sentry active.' },
+    { id: 'BRAVO', name: 'Sector Bravo', pos: { x: 60, y: 30 }, status: 'active', details: 'Secondary patrol zone. Dense vegetation. Thermal sensors deployed.' },
+    { id: 'ECHO', name: 'Sector Echo', pos: { x: 45, y: 65 }, status: 'warning', details: 'Restricted access zone. High risk of infiltration. Motion sensors triggered.' },
+    { id: 'DELTA', name: 'Sector Delta', pos: { x: 75, y: 70 }, status: 'active', details: 'Logistics hub. Secure perimeter. 24/7 drone surveillance.' },
+  ];
+
+  useEffect(() => {
+    const handleRemotePing = (e: any) => {
+      const data = e.detail;
+      const id = Math.random().toString(36).substr(2, 9);
+      const [lat, lng] = offsetCoords(coords, data.x, data.y);
+      setPings(prev => [...prev, { id, lat, lng }]);
+      setTimeout(() => {
+        setPings(prev => prev.filter(p => p.id !== id));
+      }, 2000);
+    };
+
+    window.addEventListener('remote-ping', handleRemotePing);
+    return () => window.removeEventListener('remote-ping', handleRemotePing);
+  }, [coords]);
+
+  const [droneTrail, setDroneTrail] = useState<[number, number][]>([]);
   const [showWeather, setShowWeather] = useState(false);
   const [showZones, setShowZones] = useState(true);
   const [showRoutes, setShowRoutes] = useState(true);
-  const [selectedSector, setSelectedSector] = useState<string | null>(null);
-
-  // Dynamic sector statuses based on entities and alerts
-  const getSectorStatus = (sectorId: string): 'secure' | 'warning' | 'alert' => {
-    // If there's an active alert in this sector (simulated by random or proximity)
-    // For now, let's use the entities to determine status
-    const sectorEntities = entities.filter(e => {
-      // Simple logic: Alpha is top, Bravo is right, Charlie is bottom
-      if (sectorId === 'SEC_ALPHA') return e.y < 40;
-      if (sectorId === 'SEC_BRAVO') return e.x > 60;
-      if (sectorId === 'SEC_CHARLIE') return e.y > 60;
-      return false;
-    });
-
-    if (sectorEntities.some(e => e.type === 'armed')) return 'alert';
-    if (sectorEntities.some(e => e.type === 'suspicious')) return 'warning';
-    return 'secure';
-  };
-
-  const getSectorColor = (status: 'secure' | 'warning' | 'alert') => {
-    if (status === 'alert') return 'rgba(239, 68, 68, 0.3)'; // red
-    if (status === 'warning') return 'rgba(245, 158, 11, 0.3)'; // orange
-    return 'rgba(16, 185, 129, 0.2)'; // green
-  };
+  const [showDroneDetails, setShowDroneDetails] = useState(false);
 
   // Drone movement simulation
   useEffect(() => {
+    if (isManualControl) return;
+    
     const interval = setInterval(() => {
       setDronePos(prev => {
         const newPos = {
           x: (prev.x + 0.1) % 100,
           y: (prev.y + 0.05) % 100
         };
-        setDroneTrail(trail => [...trail.slice(-20), newPos]);
+        const realPos = offsetCoords(coords, newPos.x, newPos.y);
+        setDroneTrail(trail => [...trail.slice(-20), realPos]);
         return newPos;
       });
+      setDroneHeading(prev => (prev + 0.5) % 360);
     }, 100);
     return () => clearInterval(interval);
-  }, []);
+  }, [isManualControl, coords]);
+
+  const moveDrone = (direction: 'w' | 'a' | 's' | 'd') => {
+    const step = 1.5;
+    
+    setDronePos(prev => {
+      let newX = prev.x;
+      let newY = prev.y;
+      let newHeading = droneHeading;
+
+      if (direction === 'w') {
+        newX += Math.cos((droneHeading - 90) * (Math.PI / 180)) * step;
+        newY += Math.sin((droneHeading - 90) * (Math.PI / 180)) * step;
+      }
+      if (direction === 's') {
+        newX -= Math.cos((droneHeading - 90) * (Math.PI / 180)) * step;
+        newY -= Math.sin((droneHeading - 90) * (Math.PI / 180)) * step;
+      }
+      if (direction === 'a') {
+        newHeading = (newHeading - 10 + 360) % 360;
+      }
+      if (direction === 'd') {
+        newHeading = (newHeading + 10) % 360;
+      }
+
+      newX = Math.max(0, Math.min(100, newX));
+      newY = Math.max(0, Math.min(100, newY));
+
+      setDroneHeading(newHeading);
+      const realPos = offsetCoords(coords, newX, newY);
+      setDroneTrail(trail => [...trail.slice(-20), realPos]);
+      return { x: newX, y: newY };
+    });
+  };
+
+  // Manual Control Handler
+  useEffect(() => {
+    if (!isManualControl) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const key = e.key.toLowerCase();
+      if (['w', 'a', 's', 'd'].includes(key)) {
+        setActiveKeys(prev => new Set(prev).add(key));
+        moveDrone(key as 'w' | 'a' | 's' | 'd');
+      }
+    };
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      const key = e.key.toLowerCase();
+      setActiveKeys(prev => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, [isManualControl, droneHeading]);
+
+  const tileUrl = layer === 'satellite' 
+    ? 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
+    : 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+
+  const attribution = layer === 'satellite'
+    ? 'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EBP, and the GIS User Community'
+    : '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
 
   return (
     <div className="w-full h-full bg-zinc-900 rounded-xl border border-sentry-border relative overflow-hidden flex flex-col">
-      {/* Map Controls - Ultra-compact to prevent overlap */}
-      <div className="absolute top-4 left-4 z-50 flex flex-col gap-2 pointer-events-auto">
-        {/* Layer Selection */}
-        <div className="bg-black/80 backdrop-blur-md p-1 rounded border border-white/10 flex flex-col gap-1 shadow-xl">
+      {/* Map Controls */}
+      <div className="absolute top-3 left-3 z-[1000] flex flex-col gap-2 pointer-events-auto">
+        <div className="bg-black/80 backdrop-blur-md p-1 rounded-lg border border-white/10 flex flex-col gap-1 shadow-xl">
           <MapControlButton active={layer === 'satellite'} onClick={() => setLayer('satellite')} label="SAT" />
-          <MapControlButton active={layer === 'topo'} onClick={() => setLayer('topo')} label="TOPO" />
-          <MapControlButton active={layer === 'heat'} onClick={() => setLayer('heat')} label="HEAT" />
+          <MapControlButton active={layer === 'topo'} onClick={() => setLayer('topo')} label="MAP" />
         </div>
 
-        {/* Zoom Controls */}
-        <div className="bg-black/80 backdrop-blur-md p-1 rounded border border-white/10 flex flex-col gap-1 shadow-xl">
-          <button 
-            onClick={(e) => { e.stopPropagation(); setZoom(z => Math.min(3, z + 0.2)); }} 
-            className="w-6 h-6 flex items-center justify-center hover:bg-white/10 rounded text-white font-bold text-sm transition-colors"
-          >
-            +
-          </button>
-          <button 
-            onClick={(e) => { e.stopPropagation(); setZoom(z => Math.max(0.5, z - 0.2)); }} 
-            className="w-6 h-6 flex items-center justify-center hover:bg-white/10 rounded text-white font-bold text-sm transition-colors"
-          >
-            -
-          </button>
-        </div>
-
-        {/* Tactical Overlays */}
         <div className="flex flex-col gap-1">
           <button 
             onClick={(e) => { e.stopPropagation(); setShowWeather(!showWeather); }}
-            className={`bg-black/80 backdrop-blur-md p-1.5 rounded border transition-all shadow-xl ${showWeather ? 'text-sentry-accent border-sentry-accent/50 bg-sentry-accent/10' : 'text-white border-white/10 hover:bg-white/5'}`}
+            className={`bg-black/80 backdrop-blur-md p-1.5 rounded-lg border transition-all shadow-xl ${showWeather ? 'text-sentry-accent border-sentry-accent/50 bg-sentry-accent/10' : 'text-white border-white/10 hover:bg-white/5'}`}
             title="Weather Simulation"
           >
             <CloudRain className="w-3.5 h-3.5" />
@@ -290,7 +441,7 @@ function LiveMap({ alerts, coords, entities }: { alerts: Alert[], coords: { lat:
           
           <button 
             onClick={(e) => { e.stopPropagation(); setShowZones(!showZones); }}
-            className={`bg-black/80 backdrop-blur-md p-1.5 rounded border transition-all shadow-xl ${showZones ? 'text-sentry-accent border-sentry-accent/50 bg-sentry-accent/10' : 'text-white border-white/10 hover:bg-white/5'}`}
+            className={`bg-black/80 backdrop-blur-md p-1.5 rounded-lg border transition-all shadow-xl ${showZones ? 'text-sentry-accent border-sentry-accent/50 bg-sentry-accent/10' : 'text-white border-white/10 hover:bg-white/5'}`}
             title="Surveillance Zones"
           >
             <Target className="w-3.5 h-3.5" />
@@ -298,288 +449,230 @@ function LiveMap({ alerts, coords, entities }: { alerts: Alert[], coords: { lat:
 
           <button 
             onClick={(e) => { e.stopPropagation(); setShowRoutes(!showRoutes); }}
-            className={`bg-black/80 backdrop-blur-md p-1.5 rounded border transition-all shadow-xl ${showRoutes ? 'text-sentry-accent border-sentry-accent/50 bg-sentry-accent/10' : 'text-white border-white/10 hover:bg-white/5'}`}
+            className={`bg-black/80 backdrop-blur-md p-1.5 rounded-lg border transition-all shadow-xl ${showRoutes ? 'text-sentry-accent border-sentry-accent/50 bg-sentry-accent/10' : 'text-white border-white/10 hover:bg-white/5'}`}
             title="Patrol Routes"
           >
             <Navigation className="w-3.5 h-3.5" />
           </button>
+
+          <button 
+            onClick={(e) => { e.stopPropagation(); setIsManualControl(!isManualControl); }}
+            className={`bg-black/80 backdrop-blur-md p-1.5 rounded-lg border transition-all shadow-xl ${isManualControl ? 'text-orange-500 border-orange-500/50 bg-orange-500/10' : 'text-white border-white/10 hover:bg-white/5'}`}
+            title="Manual Drone Control"
+          >
+            <Gamepad2 className="w-3.5 h-3.5" />
+          </button>
         </div>
       </div>
 
-      {/* Sector Status Overlay - Dynamic based on status */}
-      <div className="absolute bottom-20 right-4 z-20 flex flex-col gap-1">
-        {SECTOR_DEFINITIONS.map(sector => (
-          <div key={sector.id}>
-            <SectorStatus 
-              label={sector.id} 
-              status={getSectorStatus(sector.id)} 
-              onClick={() => setSelectedSector(sector.id)} 
-            />
+      {/* Manual Control HUD */}
+      {isManualControl && (
+        <div className="absolute bottom-4 left-16 z-[1000] bg-black/90 backdrop-blur-md p-3 rounded-xl border border-orange-500/30 flex flex-col gap-2 shadow-2xl">
+          <div className="flex items-center justify-between gap-4 mb-1">
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-orange-500 animate-pulse" />
+              <span className="text-[10px] font-black text-orange-500 uppercase tracking-widest">Manual Pilot Mode</span>
+            </div>
+            <button onClick={() => setIsManualControl(false)} className="text-zinc-500 hover:text-white">
+              <X className="w-3 h-3" />
+            </button>
           </div>
-        ))}
-      </div>
+          <div className="grid grid-cols-3 gap-1">
+            <div />
+            <ControlButton label="W" active={activeKeys.has('w')} onClick={() => moveDrone('w')} />
+            <div />
+            <ControlButton label="A" active={activeKeys.has('a')} onClick={() => moveDrone('a')} />
+            <ControlButton label="S" active={activeKeys.has('s')} onClick={() => moveDrone('s')} />
+            <ControlButton label="D" active={activeKeys.has('d')} onClick={() => moveDrone('d')} />
+          </div>
+        </div>
+      )}
 
-      {/* Sector Details Modal */}
-      <AnimatePresence>
-        {selectedSector && (
-          <motion.div 
-            initial={{ opacity: 0, x: 20 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: 20 }}
-            className="absolute top-4 right-32 z-30 w-48 bg-black/80 backdrop-blur-xl border border-sentry-border rounded-xl p-4 shadow-2xl"
-          >
-            <div className="flex justify-between items-center mb-3">
-              <h3 className="text-xs font-black text-white tracking-widest uppercase">{selectedSector} DETAILS</h3>
-              <button onClick={() => setSelectedSector(null)} className="text-zinc-500 hover:text-white">×</button>
-            </div>
-            <div className="space-y-2">
-              <DetailRow label="Personnel" value={`${entities.filter(e => e.type === 'friendly').length} Active`} />
-              <DetailRow label="Last Scan" value="Real-time" />
-              <DetailRow label="Stability" value={entities.some(e => e.type === 'armed') ? 'CRITICAL' : 'STABLE'} />
-              <DetailRow label="Threats" value={entities.filter(e => e.type !== 'friendly').length.toString()} />
-              <div className="pt-2 border-t border-white/10">
-                <div className="flex items-center gap-1">
-                  <div className="w-1 h-1 rounded-full bg-sentry-success animate-ping" />
-                  <span className="text-[7px] font-mono text-sentry-success uppercase">Uplink Active</span>
-                </div>
-              </div>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      <div className="flex-1 relative overflow-hidden bg-black/40">
-        {/* Scaling Container - Wraps everything to ensure zoom works */}
-        <motion.div 
-          animate={{ scale: zoom }}
-          transition={{ type: 'spring', stiffness: 200, damping: 25 }}
-          className="absolute inset-0 origin-center flex items-center justify-center"
+      {/* Real Map Container */}
+      <div className="flex-1 relative">
+        <MapContainer 
+          center={[coords.lat, coords.lng]} 
+          zoom={zoom} 
+          style={{ height: '100%', width: '100%', background: '#09090b' }}
+          zoomControl={false}
         >
-          <div className="absolute inset-0 grid-overlay opacity-30 pointer-events-none" />
+          <MapUpdater coords={coords} />
+          <TileLayer url={tileUrl} attribution={attribution} />
           
-          <div className="relative w-full h-full">
-            {/* Weather Simulation Overlay */}
-            {showWeather && (
-              <div className="absolute inset-0 z-10 pointer-events-none overflow-hidden">
-                <div className="absolute inset-0 bg-blue-900/10" />
-                {[...Array(50)].map((_, i) => (
-                  <motion.div
-                    key={i}
-                    initial={{ y: -20, x: Math.random() * 100 + '%' }}
-                    animate={{ y: 1000 }}
-                    transition={{ duration: 0.4 + Math.random() * 0.6, repeat: Infinity, ease: "linear" }}
-                    className="absolute w-[1px] h-10 bg-blue-400/40"
+          {/* Weather Simulation Overlay (CSS based) */}
+          {showWeather && (
+            <div className="absolute inset-0 z-[400] pointer-events-none overflow-hidden">
+              {[...Array(30)].map((_, i) => (
+                <motion.div
+                  key={i}
+                  initial={{ y: -20, x: Math.random() * 100 + '%' }}
+                  animate={{ y: 1000 }}
+                  transition={{ duration: 0.4 + Math.random() * 0.6, repeat: Infinity, ease: "linear" }}
+                  className="absolute w-[1px] h-10 bg-blue-400/30"
+                />
+              ))}
+            </div>
+          )}
+
+          {/* Sectors as Circles/Markers */}
+          {sectors.map(sector => {
+            const pos = offsetCoords(coords, sector.pos.x, sector.pos.y);
+            return (
+              <React.Fragment key={sector.id}>
+                {showZones && (
+                  <Circle 
+                    center={pos}
+                    radius={300}
+                    pathOptions={{ 
+                      color: sector.status === 'warning' ? '#f59e0b' : '#10b981',
+                      fillColor: sector.status === 'warning' ? '#f59e0b' : '#10b981',
+                      fillOpacity: 0.1,
+                      weight: 1,
+                      dashArray: '5, 5'
+                    }}
                   />
-                ))}
-              </div>
-            )}
-
-            {/* Simulated Terrain Features based on layer */}
-            {layer === 'topo' && (
-              <svg className="absolute inset-0 w-full h-full opacity-20" viewBox="0 0 100 100">
-                <path d="M0 20 Q 25 10 50 20 T 100 20" fill="none" stroke="white" strokeWidth="0.5" />
-                <path d="M0 40 Q 25 30 50 40 T 100 40" fill="none" stroke="white" strokeWidth="0.5" />
-                <path d="M0 60 Q 25 50 50 60 T 100 60" fill="none" stroke="white" strokeWidth="0.5" />
-              </svg>
-            )}
-
-            {layer === 'heat' && (
-              <div className="absolute inset-0 bg-gradient-to-br from-blue-500/10 via-orange-500/10 to-red-500/10 animate-pulse" />
-            )}
-
-            {/* Simulated Border Line */}
-            <div className="absolute top-1/2 left-0 w-full h-px bg-red-500/30 border-t border-dashed border-red-500/50" />
-            <div className="absolute top-[48%] left-4 text-[10px] font-mono text-red-500/50 uppercase">Border Line Alpha-7</div>
-
-            {/* Surveillance Zones - Color-coded by status */}
-            {showZones && (
-              <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">
-                {SECTOR_DEFINITIONS.map(sector => {
-                  const status = getSectorStatus(sector.id);
-                  return (
-                    <g key={sector.id}>
-                      <motion.polygon 
-                        points={sector.points} 
-                        initial={false}
-                        animate={{ fill: getSectorColor(status) }}
-                        stroke={status === 'alert' ? 'rgba(239, 68, 68, 0.5)' : 'rgba(255,255,255,0.2)'} 
-                        strokeWidth={status === 'alert' ? "1" : "0.5"}
-                        className="transition-colors duration-500"
-                      />
-                      <text 
-                        x={sector.points.split(' ')[0].split(',')[0]} 
-                        y={sector.points.split(' ')[0].split(',')[1]} 
-                        className="text-[3px] fill-white/50 font-mono font-black"
-                      >
-                        {sector.name}
-                      </text>
-                    </g>
-                  );
-                })}
-              </svg>
-            )}
-
-            {/* Patrol Routes */}
-            {showRoutes && (
-              <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">
-                {PATROL_ROUTES.map(route => (
-                  <polyline 
-                    key={route.id}
-                    points={route.path}
-                    fill="none"
-                    stroke={route.color}
-                    strokeWidth="0.5"
-                    strokeDasharray="2,2"
-                  />
-                ))}
-              </svg>
-            )}
-
-            {/* Radar Circles */}
-            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[80%] aspect-square border border-white/5 rounded-full" />
-            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[60%] aspect-square border border-white/5 rounded-full" />
-            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[40%] aspect-square border border-white/5 rounded-full" />
-            
-            {/* Radar Sweep */}
-            <motion.div 
-              animate={{ rotate: 360 }}
-              transition={{ duration: 4, repeat: Infinity, ease: "linear" }}
-              className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full h-full origin-center pointer-events-none"
-              style={{ background: 'conic-gradient(from 0deg, rgba(59, 130, 246, 0.1) 0deg, transparent 90deg)' }}
-            />
-
-            {/* Drone Trail */}
-            <svg className="absolute inset-0 w-full h-full pointer-events-none">
-              <polyline
-                points={droneTrail.map(p => `${(p.x / 100) * 1000},${(p.y / 100) * 1000}`).join(' ')}
-                fill="none"
-                stroke="rgba(59, 130, 246, 0.3)"
-                strokeWidth="2"
-                viewBox="0 0 1000 1000"
-              />
-            </svg>
-
-            {/* Drone Marker */}
-            <motion.div 
-              className="absolute w-4 h-4 text-sentry-accent"
-              style={{ left: `${dronePos.x}%`, top: `${dronePos.y}%` }}
-            >
-              <Navigation className="w-full h-full rotate-45" />
-              <div className="absolute -top-4 left-1/2 -translate-x-1/2 text-[6px] font-mono text-white bg-black/50 px-1 rounded">DRONE_01</div>
-            </motion.div>
-
-            {/* Alert Markers */}
-            {alerts.filter(a => a.status === 'active').map((alert, i) => (
-              <motion.div
-                key={alert.id}
-                initial={{ scale: 0, opacity: 0 }}
-                animate={{ 
-                  scale: [1 / zoom, 1.2 / zoom, 1 / zoom], // Compensate for map zoom
-                  opacity: 1 
-                }}
-                transition={{ repeat: Infinity, duration: 2 }}
-                className="absolute cursor-pointer group/marker"
-                style={{ 
-                  top: `${35 + (i * 12) % 30}%`, 
-                  left: `${25 + (i * 18) % 50}%` 
-                }}
-              >
-                <div className={`w-4 h-4 rounded-full animate-ping absolute ${
-                  alert.severity === 'critical' ? 'bg-red-500' : 'bg-orange-500'
-                }`} />
-                <div className={`w-4 h-4 rounded-full relative border-2 border-white/50 ${
-                  alert.severity === 'critical' ? 'bg-red-500' : 'bg-orange-500'
-                }`} />
-                
-                {/* Threat Label */}
-                <div className="absolute top-6 left-1/2 -translate-x-1/2 bg-black/90 px-2 py-1 rounded border border-white/20 whitespace-nowrap opacity-0 group-hover/marker:opacity-100 transition-opacity z-50">
-                  <div className="flex flex-col gap-0.5">
-                    <span className="text-[9px] font-black text-white uppercase tracking-tighter">{alert.severity} THREAT</span>
-                    <span className="text-[7px] font-mono text-zinc-400 max-w-[120px] truncate">{alert.description}</span>
-                  </div>
-                </div>
-              </motion.div>
-            ))}
-
-            {/* Tactical Entities (Personnel/Threats) */}
-            {entities.map((entity) => (
-              <motion.div
-                key={entity.id}
-                className="absolute"
-                style={{ left: `${entity.x}%`, top: `${entity.y}%` }}
-                animate={{ scale: 1 / zoom }} // Compensate for map zoom
-              >
-                <div className="relative group/entity">
-                  <div className={`p-1 rounded-full border shadow-lg transition-all ${
-                    entity.type === 'friendly' ? 'bg-blue-600/20 border-blue-500 text-blue-400' :
-                    entity.type === 'armed' ? 'bg-red-600/20 border-red-500 text-red-500 animate-pulse' :
-                    'bg-orange-600/20 border-orange-500 text-orange-400'
-                  }`}>
-                    {entity.type === 'friendly' ? <User className="w-3 h-3" /> :
-                     entity.type === 'armed' ? <AlertTriangle className="w-3 h-3" /> :
-                     <Target className="w-3 h-3" />}
-                  </div>
-
-                  {/* Entity Label */}
-                  <div className="absolute -top-12 left-1/2 -translate-x-1/2 bg-black/90 px-2 py-1.5 rounded border border-white/10 whitespace-nowrap opacity-0 group-hover/entity:opacity-100 transition-opacity z-50 shadow-2xl">
-                    <div className="flex flex-col items-center gap-1">
-                      <span className="text-[8px] font-black text-white uppercase tracking-wider">{entity.label}</span>
-                      <div className="flex items-center gap-1.5">
-                        <span className={`text-[6px] font-bold px-1 rounded ${
-                          entity.movementPattern === 'aggressive' ? 'bg-red-500/20 text-red-500' :
-                          entity.movementPattern === 'stealthy' ? 'bg-purple-500/20 text-purple-400' :
-                          'bg-zinc-500/20 text-zinc-400'
-                        }`}>
-                          {entity.movementPattern?.toUpperCase()}
-                        </span>
-                        <span className="text-[6px] font-mono text-zinc-500">
-                          {entity.detectedBy} {entity.hasId ? '| ID_VERIFIED' : '| NO_ID'}
-                        </span>
+                )}
+                <Marker 
+                  position={pos}
+                  eventHandlers={{
+                    click: () => {
+                      setSelectedSector(sector.id);
+                      setActiveCamera(sector.id);
+                    }
+                  }}
+                >
+                  <Popup>
+                    <div className="p-2 min-w-[150px]">
+                      <h3 className="text-xs font-bold text-zinc-900 uppercase tracking-widest mb-1">{sector.name}</h3>
+                      <p className="text-[10px] text-zinc-600 leading-tight">{sector.details}</p>
+                      <div className="mt-2 flex items-center gap-2">
+                        <div className={`w-1.5 h-1.5 rounded-full ${sector.status === 'active' ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse'}`} />
+                        <span className="text-[9px] font-bold text-zinc-500 uppercase tracking-widest">{sector.status}</span>
                       </div>
-                      {entity.visualCues && (
-                        <div className="flex flex-wrap gap-1 justify-center max-w-[120px]">
-                          {entity.visualCues.map(cue => (
-                            <span key={cue} className="text-[5px] text-zinc-400 border border-white/5 px-1 rounded bg-white/5">
-                              {cue}
-                            </span>
-                          ))}
+                    </div>
+                  </Popup>
+                </Marker>
+              </React.Fragment>
+            );
+          })}
+
+          {/* Patrol Routes as Polylines */}
+          {showRoutes && PATROL_ROUTES.map(route => {
+            const positions = route.path.split(' ').map(p => {
+              const [x, y] = p.split(',').map(Number);
+              return offsetCoords(coords, x, y);
+            });
+            return (
+              <Polyline 
+                key={route.id}
+                positions={positions}
+                pathOptions={{ color: 'white', weight: 1, dashArray: '5, 10', opacity: 0.3 }}
+              />
+            );
+          })}
+
+          {/* Drone Trail */}
+          <Polyline 
+            positions={droneTrail}
+            pathOptions={{ color: '#f97316', weight: 2, opacity: 0.5 }}
+          />
+
+          {/* Drone Marker */}
+          <Marker 
+            position={offsetCoords(coords, dronePos.x, dronePos.y)}
+            icon={L.divIcon({
+              className: 'drone-marker',
+              html: `<div style="transform: rotate(${droneHeading}deg); color: #f97316; filter: drop-shadow(0 0 8px rgba(249, 115, 22, 0.6));">
+                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <polygon points="3 11 22 2 13 21 11 13 3 11"/>
+                      </svg>
+                    </div>`,
+              iconSize: [24, 24],
+              iconAnchor: [12, 12]
+            })}
+          />
+
+          {/* Pings */}
+          {pings.map(ping => (
+            <Circle 
+              key={ping.id}
+              center={[ping.lat, ping.lng]}
+              radius={100}
+              pathOptions={{ color: '#3b82f6', fillColor: '#3b82f6', fillOpacity: 0.4, weight: 1 }}
+            />
+          ))}
+
+          {/* Entities */}
+          {entities.map(entity => {
+            const pos = offsetCoords(coords, entity.x, entity.y);
+            const color = entity.type === 'friendly' ? '#3b82f6' : entity.type === 'armed' ? '#ef4444' : '#f59e0b';
+            return (
+              <Marker 
+                key={entity.id}
+                position={pos}
+                icon={L.divIcon({
+                  className: 'entity-marker',
+                  html: `<div class="w-4 h-4 rounded-full border-2 shadow-lg animate-pulse" style="border-color: ${color}; background-color: ${color}33;"></div>`,
+                  iconSize: [16, 16],
+                  iconAnchor: [8, 8]
+                })}
+              >
+                <Popup>
+                  <div className="p-2 min-w-[120px]">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-[10px] font-black uppercase tracking-widest" style={{ color }}>{entity.type}</span>
+                      <span className="text-[8px] font-mono text-zinc-400">{entity.id}</span>
+                    </div>
+                    <p className="text-[11px] font-bold text-zinc-900 mb-1">{entity.label}</p>
+                    <div className="flex flex-col gap-1">
+                      <div className="flex justify-between text-[9px]">
+                        <span className="text-zinc-500">Source:</span>
+                        <span className="font-mono">{entity.detectedBy}</span>
+                      </div>
+                      {entity.movementPattern && (
+                        <div className="flex justify-between text-[9px]">
+                          <span className="text-zinc-500">Pattern:</span>
+                          <span className="font-mono uppercase">{entity.movementPattern}</span>
                         </div>
                       )}
                     </div>
                   </div>
+                </Popup>
+              </Marker>
+            );
+          })}
+        </MapContainer>
 
-                  {/* Detection Ring for Suspicious/Armed */}
-                  {entity.type !== 'friendly' && (
-                    <div className={`absolute inset-0 rounded-full animate-ping opacity-30 ${
-                      entity.type === 'armed' ? 'bg-red-500' : 'bg-orange-500'
-                    }`} />
-                  )}
-                </div>
-              </motion.div>
-            ))}
-          </div>
-        </motion.div>
+        {/* Radar Sweep Overlay (Visual only) */}
+        <div className="absolute inset-0 z-[500] pointer-events-none overflow-hidden">
+          <motion.div 
+            animate={{ rotate: 360 }}
+            transition={{ duration: 10, repeat: Infinity, ease: "linear" }}
+            className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[200%] h-[200%] origin-center"
+            style={{ background: 'conic-gradient(from 0deg, rgba(59, 130, 246, 0.05) 0deg, transparent 60deg)' }}
+          />
+        </div>
       </div>
 
-      <div className="p-4 border-t border-sentry-border bg-black/20 flex justify-between items-center">
-        <div className="flex gap-4">
-          <div className="flex items-center gap-2">
-            <Navigation className="w-3 h-3 text-sentry-accent" />
-            <span className="text-[10px] font-mono">LAT: {coords.lat.toFixed(4)}° {coords.lat >= 0 ? 'N' : 'S'}</span>
+      <div className="p-3 border-t border-sentry-border bg-black/40 flex justify-between items-center">
+        <div className="flex gap-6">
+          <div className="flex items-center gap-2.5">
+            <Navigation className="w-3.5 h-3.5 text-sentry-accent flex-shrink-0" />
+            <span className="text-[10px] font-mono text-white/90 tracking-tight">LAT: {coords.lat.toFixed(4)}° {coords.lat >= 0 ? 'N' : 'S'}</span>
           </div>
-          <div className="flex items-center gap-2">
-            <Navigation className="w-3 h-3 text-sentry-accent" />
-            <span className="text-[10px] font-mono">LONG: {coords.lng.toFixed(4)}° {coords.lng >= 0 ? 'E' : 'W'}</span>
+          <div className="flex items-center gap-2.5">
+            <Navigation className="w-3.5 h-3.5 text-sentry-accent flex-shrink-0" />
+            <span className="text-[10px] font-mono text-white/90 tracking-tight">LONG: {coords.lng.toFixed(4)}° {coords.lng >= 0 ? 'E' : 'W'}</span>
           </div>
         </div>
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2">
-            <Activity className="w-3 h-3 text-zinc-500" />
-            <span className="text-[10px] font-mono">WIND: 12km/h NW</span>
+        <div className="flex items-center gap-6">
+          <div className="flex items-center gap-2.5">
+            <Activity className="w-3.5 h-3.5 text-zinc-500 flex-shrink-0" />
+            <span className="text-[10px] font-mono text-zinc-400">WIND: 12km/h NW</span>
           </div>
-          <div className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-sentry-success animate-pulse" />
-            <span className="text-[10px] font-mono">GPS: LOCKED</span>
+          <div className="flex items-center gap-2.5">
+            <div className="w-2 h-2 rounded-full bg-sentry-success animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
+            <span className="text-[10px] font-mono text-sentry-success font-bold">GPS: LOCKED</span>
           </div>
         </div>
       </div>
@@ -596,7 +689,7 @@ function DetailRow({ label, value }: { label: string, value: string }) {
   );
 }
 
-function SectorStatus({ label, status, onClick }: { label: string, status: 'secure' | 'warning' | 'alert', onClick: () => void }) {
+function SectorStatus({ label, status, onClick }: { label: string, status: 'secure' | 'warning' | 'alert', onClick: (e: React.MouseEvent) => void }) {
   return (
     <div 
       onClick={onClick}
@@ -611,11 +704,11 @@ function SectorStatus({ label, status, onClick }: { label: string, status: 'secu
   );
 }
 
-function MapControlButton({ active, onClick, label }: { active: boolean, onClick: () => void, label: string }) {
+function MapControlButton({ active, onClick, label }: { active: boolean, onClick: (e: React.MouseEvent) => void, label: string }) {
   return (
     <button 
       onClick={onClick}
-      className={`px-2 py-1 rounded text-[9px] font-bold transition-all ${
+      className={`px-1.5 py-0.5 rounded text-[8px] font-black transition-all ${
         active ? 'bg-sentry-accent text-white' : 'text-zinc-500 hover:text-white hover:bg-white/5'
       }`}
     >
@@ -626,7 +719,24 @@ function MapControlButton({ active, onClick, label }: { active: boolean, onClick
 
 // --- Main App Component ---
 export default function App() {
+  return (
+    <ErrorBoundary>
+      <AppContent />
+    </ErrorBoundary>
+  );
+}
+
+function AppContent() {
+  const [operatorName, setOperatorName] = useState('OPERATOR_01');
   const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [startTime] = useState(Date.now());
+  const [uptime, setUptime] = useState('00:00:00');
+  const [showAlerts, setShowAlerts] = useState(false);
+  const [generatingClip, setGeneratingClip] = useState<string | null>(null);
+  const [socket, setSocket] = useState<Socket | null>(null);
+  const [activeCamera, setActiveCamera] = useState('ALPHA');
+  const [selectedSector, setSelectedSector] = useState<string | null>('ALPHA');
+  const [isEditingOperator, setIsEditingOperator] = useState(false);
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [systemLogs, setSystemLogs] = useState<SystemLog[]>([]);
   const [isMonitoring, setIsMonitoring] = useState(false);
@@ -648,28 +758,91 @@ export default function App() {
   });
   const [tacticalEntities, setTacticalEntities] = useState<TacticalEntity[]>([]);
   const [currentTime, setCurrentTime] = useState(new Date());
+  const [coords, setCoords] = useState({ lat: 34.22, lng: 77.58 }); // Default to Leh, Ladakh
+  const [threatCounts, setThreatCounts] = useState({ low: 0, medium: 0, high: 0, critical: 0 });
+
+  const handleManualLogin = (name: string) => {
+    setOperatorName(name);
+    setIsLoggedIn(true);
+  };
+
+  const handleLogout = () => {
+    setIsLoggedIn(false);
+  };
+
+  useEffect(() => {
+    const newSocket = io(window.location.origin);
+    setSocket(newSocket);
+
+    newSocket.on('ping', (data) => {
+      window.dispatchEvent(new CustomEvent('remote-ping', { detail: data }));
+    });
+
+    newSocket.on('alert', (data) => {
+      const alertWithDate = {
+        ...data,
+        timestamp: data.timestamp instanceof Date ? data.timestamp : new Date(data.timestamp)
+      };
+      setAlerts(prev => [alertWithDate, ...prev]);
+      setSystemLogs(prev => [{
+        id: Math.random().toString(36).substr(2, 9),
+        timestamp: new Date(),
+        event: `REMOTE_ALERT: ${data.description}`,
+        type: 'warning'
+      }, ...prev]);
+    });
+
+    return () => {
+      newSocket.disconnect();
+    };
+  }, []);
+
+  const generateSatelliteClip = async (alertId: string) => {
+    setGeneratingClip(alertId);
+    // Simulate generation time
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    setGeneratingClip(null);
+    // In a real app, this would trigger a notification or open a modal
+    setSystemLogs(prev => [{
+      id: Math.random().toString(36).substr(2, 9),
+      timestamp: new Date(),
+      event: `SATELLITE_CLIP_GENERATED_FOR_ALERT_${alertId.slice(0, 4)}`,
+      type: 'success'
+    }, ...prev]);
+  };
   
+  // Uptime Counter
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const diff = Date.now() - startTime;
+      const hours = Math.floor(diff / 3600000);
+      const minutes = Math.floor((diff % 3600000) / 60000);
+      const seconds = Math.floor((diff % 60000) / 1000);
+      setUptime(`${hours.toString().padStart(3, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [startTime]);
+
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
-  // Mock Personnel Data
-  const personnel: Personnel[] = [
-    { id: 'P01', name: 'Maj. Vikram Singh', rank: 'Major', status: 'active', location: 'Sector A' },
-    { id: 'P02', name: 'Capt. Ananya Rao', rank: 'Captain', status: 'deployed', location: 'Sector B' },
-    { id: 'P03', name: 'Sub. Rajesh Kumar', rank: 'Subedar', status: 'active', location: 'Sector C' },
-    { id: 'P04', name: 'Lt. Priya Sharma', rank: 'Lieutenant', status: 'on-leave', location: 'Base' },
-  ];
+  const [personnel, setPersonnel] = useState<Personnel[]>([
+    { id: 'IA-2944-X', name: 'Vikram Singh', rank: 'Major', status: 'ACTIVE', clearance: 'LEVEL_5', lastSeen: 'Sector A' },
+    { id: 'IA-8812-B', name: 'Ananya Rao', rank: 'Captain', status: 'DEPLOYED', clearance: 'LEVEL_4', lastSeen: 'Sector B' },
+    { id: 'IA-1102-S', name: 'Rajesh Kumar', rank: 'Subedar', status: 'ACTIVE', clearance: 'LEVEL_3', lastSeen: 'Sector C' },
+    { id: 'IA-5567-L', name: 'Priya Sharma', rank: 'Lieutenant', status: 'OFF_DUTY', clearance: 'LEVEL_3', lastSeen: 'Base' },
+  ]);
 
   // Add Log Helper
   const addLog = (event: string, type: SystemLog['type'] = 'info') => {
-    const newLog: SystemLog = {
+    const newLog = {
       id: Math.random().toString(36).substr(2, 9),
       timestamp: new Date(),
       event,
       type
     };
-    setSystemLogs(prev => [newLog, ...prev].slice(0, 100));
+    setSystemLogs(prev => [newLog, ...prev]);
   };
 
   // Add Message Helper
@@ -702,13 +875,13 @@ export default function App() {
           let responseText = '';
 
           if (lowerContent.includes('alert') || lowerContent.includes('red')) {
-            responseText = `Copy that, Operator. This is ${respondingUnit.rank} ${respondingUnit.name}. Unit ${respondingUnit.id} is moving to high alert status. ${respondingUnit.location} is being locked down.`;
+            responseText = `Copy that, Operator. This is ${respondingUnit.rank} ${respondingUnit.name}. Unit ${respondingUnit.id} is moving to high alert status. ${respondingUnit.lastSeen || 'Current sector'} is being locked down.`;
           } else if (lowerContent.includes('safe')) {
-            responseText = `Acknowledged. ${respondingUnit.rank} ${respondingUnit.name} reporting ${respondingUnit.location} is secure. Continuing standard patrol.`;
+            responseText = `Acknowledged. ${respondingUnit.rank} ${respondingUnit.name} reporting ${respondingUnit.lastSeen || 'current sector'} is secure. Continuing standard patrol.`;
           } else if (lowerContent.includes('suspicious')) {
             responseText = `Unit ${respondingUnit.id} here. ${respondingUnit.rank} ${respondingUnit.name} has visual on the suspicious activity. Engaging surveillance protocols.`;
           } else {
-            responseText = `${respondingUnit.rank} ${respondingUnit.name} reporting in. Current status: ${respondingUnit.status.toUpperCase()} in ${respondingUnit.location}. All systems nominal.`;
+            responseText = `${respondingUnit.rank} ${respondingUnit.name} reporting in. Current status: ${respondingUnit.status.toUpperCase()} in ${respondingUnit.lastSeen || 'assigned sector'}. All systems nominal.`;
           }
 
           const aiMessage: ChatMessage = {
@@ -826,7 +999,7 @@ export default function App() {
     ];
     setTacticalEntities(initialEntities);
 
-    const interval = setInterval(() => {
+    const interval = setInterval(async () => {
       setTacticalEntities(prev => prev.map(entity => {
         // Move entities based on pattern
         let speed = 0.2;
@@ -852,53 +1025,38 @@ export default function App() {
           y: Math.max(0, Math.min(100, entity.y + dy))
         };
       }));
-
-      // Randomly spawn a new suspicious/armed person
-      if (Math.random() > 0.98) {
-        const isArmed = Math.random() > 0.7;
-        const pattern = isArmed ? 'aggressive' : (Math.random() > 0.5 ? 'stealthy' : 'erratic');
-        
-        const cues = isArmed 
-          ? ['Weapon Visible', 'Tactical Vest', 'Rapid Movement'] 
-          : ['Unidentified Gear', 'Avoiding Cameras', 'Loitering'];
-
-        const newEntity: TacticalEntity = {
-          id: 'T' + Math.random().toString(36).substr(2, 4),
-          type: isArmed ? 'armed' : 'suspicious',
-          x: Math.random() * 100,
-          y: Math.random() * 100,
-          label: isArmed ? 'ARMED_THREAT' : 'SUSPICIOUS_PERSON',
-          hasId: false,
-          detectedBy: 'AI_VISION',
-          movementPattern: pattern,
-          visualCues: cues
-        };
-        
-        setTacticalEntities(prev => [...prev, newEntity]);
-        
-        // Add alert for suspicious/armed
-        const sector = ['A', 'B', 'C'][Math.floor(Math.random() * 3)];
-        const newAlert: Alert = {
-          id: Math.random().toString(36).substr(2, 9),
-          timestamp: new Date(),
-          type: isArmed ? 'Armed Personnel' : 'Suspicious Movement',
-          description: `${isArmed ? 'Armed individual' : 'Unidentified person'} detected in Sector ${sector}. ` +
-                       `Movement: ${pattern}. Cues: ${cues.join(', ')}. No military ID detected.`,
-          severity: isArmed ? 'critical' : 'high',
-          status: 'active'
-        };
-        setAlerts(prev => [newAlert, ...prev]);
-        addLog(`AI VISION: ${newAlert.description}`, isArmed ? 'error' : 'warning');
-        setSystemStatus(isArmed ? 'critical' : 'high');
-        setLastDetection(newAlert.description);
-
-        // Automatic message to all units
-        sendMessage(`ALERT: ${newAlert.description}. All units in Sector ${sector} move to intercept.`, 'COMMAND_AI', 'system', true);
-      }
     }, 2000);
 
     return () => clearInterval(interval);
   }, [isLoggedIn, isMonitoring]);
+
+  // Play Alert Audio (TTS)
+  const playAlertAudio = async (text: string) => {
+    if (!isSpeakerEnabled) return;
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash-preview-tts",
+        contents: [{ parts: [{ text: `Announce urgently: ${text}` }] }],
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: 'Fenrir' },
+            },
+          },
+        },
+      });
+
+      const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (base64Audio) {
+        const audio = new Audio(`data:audio/mp3;base64,${base64Audio}`);
+        audio.play();
+      }
+    } catch (error) {
+      console.error('TTS Error:', error);
+    }
+  };
 
   // Monitoring Loop
   useEffect(() => {
@@ -908,6 +1066,8 @@ export default function App() {
         if (videoRef.current && canvasRef.current && !isAiProcessing) {
           const canvas = canvasRef.current;
           const video = videoRef.current;
+          if (video.videoWidth === 0) return;
+          
           canvas.width = video.videoWidth;
           canvas.height = video.videoHeight;
           const ctx = canvas.getContext('2d');
@@ -916,61 +1076,78 @@ export default function App() {
             const base64Image = canvas.toDataURL('image/jpeg', 0.8);
             
             setIsAiProcessing(true);
-            const result = await analyzeFrame(base64Image, visionMode);
-            setIsAiProcessing(false);
+            try {
+              const result = await analyzeFrame(base64Image, visionMode, activeCamera);
+              setIsAiProcessing(false);
 
-            if (result.isSuspicious) {
-              const newAlert: Alert = {
-                id: Math.random().toString(36).substr(2, 9),
-                timestamp: new Date(),
-                type: 'Suspicious Activity',
-                description: result.description,
-                severity: result.threatLevel,
-                imageUrl: base64Image,
-                status: 'active'
-              };
-              setAlerts(prev => [newAlert, ...prev].slice(0, 50));
-              setSystemStatus(result.threatLevel);
-              setLastDetection(result.description);
-              addLog(`THREAT DETECTED: ${result.description}`, result.threatLevel === 'critical' ? 'error' : 'warning');
-              
-              // Automatic message to all units
-              sendMessage(`CRITICAL: ${result.description}. Immediate response required.`, 'SENTRY_AI', 'system', true);
+              // Update Tactical Entities from AI detection (always, even if not suspicious)
+              if (result.detectedObjects && result.detectedObjects.length > 0) {
+                const newEntities: TacticalEntity[] = result.detectedObjects.map(obj => ({
+                  id: 'AI_' + Math.random().toString(36).substr(2, 4),
+                  type: obj.type || 'suspicious',
+                  x: obj.x,
+                  y: obj.y,
+                  label: obj.label || 'AI_DETECTION',
+                  hasId: false,
+                  detectedBy: 'AI_VISION',
+                  movementPattern: result.movementPattern,
+                  visualCues: result.visualCues,
+                  temperature: result.temperature || (36.4 + Math.random() * 2.2)
+                }));
 
-              // Add to tactical entities
-              const isArmed = result.threatLevel === 'critical' || result.detectedObjects.some(o => o.toLowerCase().includes('weapon'));
-              const newEntity: TacticalEntity = {
-                id: 'AI_' + Math.random().toString(36).substr(2, 4),
-                type: isArmed ? 'armed' : 'suspicious',
-                x: 30 + (Math.random() * 40), 
-                y: 30 + (Math.random() * 40),
-                label: isArmed ? 'AI_ARMED_THREAT' : 'AI_SUSPICIOUS_PERSON',
-                hasId: false,
-                detectedBy: 'AI_VISION',
-                movementPattern: result.movementPattern,
-                visualCues: result.visualCues,
-                temperature: result.temperature || (36.4 + Math.random() * 2.2)
-              };
-              setTacticalEntities(prev => {
-                const filtered = prev.filter(e => e.detectedBy !== 'AI_VISION' || (Date.now() - (e as any)._timestamp < 30000));
-                const aiEntities = filtered.filter(e => e.detectedBy === 'AI_VISION');
-                if (aiEntities.length >= 3) {
-                  const firstAiIndex = filtered.findIndex(e => e.detectedBy === 'AI_VISION');
-                  if (firstAiIndex !== -1) filtered.splice(firstAiIndex, 1);
+                setTacticalEntities(prev => {
+                  const filtered = prev.filter(e => e.detectedBy !== 'AI_VISION');
+                  return [...filtered, ...newEntities].slice(-20);
+                });
+              }
+
+              if (result.isSuspicious) {
+                const newAlert: Alert = {
+                  id: Math.random().toString(36).substr(2, 9),
+                  timestamp: new Date(),
+                  type: 'Suspicious Activity',
+                  description: result.description,
+                  severity: result.threatLevel,
+                  imageUrl: base64Image,
+                  status: 'active'
+                };
+                setAlerts(prev => [newAlert, ...prev].slice(0, 50));
+                
+                // Emit via socket
+                if (socket) {
+                  socket.emit('alert', newAlert);
                 }
-                return [...filtered, { ...newEntity, _timestamp: Date.now() } as any];
-              });
-            } else {
-              setSystemStatus('nominal');
+
+                setSystemStatus(result.threatLevel);
+                setLastDetection(result.description);
+                addLog(`THREAT DETECTED: ${result.description}`, result.threatLevel === 'critical' ? 'error' : 'warning');
+                
+                // Update cumulative threat counts
+                setThreatCounts(prev => ({
+                  ...prev,
+                  [result.threatLevel]: prev[result.threatLevel as keyof typeof prev] + 1
+                }));
+
+                // TTS Alert
+                playAlertAudio(result.description);
+
+                // Automatic message to all units
+                sendMessage(`CRITICAL: ${result.description}. Immediate response required.`, 'SENTRY_AI', 'system', true);
+              } else {
+                setSystemStatus('nominal');
+                setLastDetection(null);
+              }
+            } catch (err) {
+              console.error("Monitoring loop error:", err);
+              setIsAiProcessing(false);
             }
           }
         }
       }, 5000);
     }
     return () => clearInterval(interval);
-  }, [isMonitoring, isAiProcessing, isLoggedIn]);
+  }, [isMonitoring, isLoggedIn, activeCamera, visionMode, socket]);
 
-  const [coords, setCoords] = useState({ lat: 32.7266, lng: 74.8570 });
 
   // Get real location on mount
   useEffect(() => {
@@ -992,7 +1169,7 @@ export default function App() {
   }, []);
 
   if (!isLoggedIn) {
-    return <Login onLogin={() => setIsLoggedIn(true)} />;
+    return <Login onLogin={handleManualLogin} />;
   }
 
   const toggleMonitoring = () => {
@@ -1012,7 +1189,7 @@ export default function App() {
   return (
     <div className="flex h-screen w-full bg-sentry-bg text-zinc-300 font-sans overflow-hidden">
       {/* Sidebar Navigation */}
-      <aside className="w-16 flex flex-col items-center py-6 border-r border-sentry-border bg-sentry-panel z-20">
+      <aside className="w-16 flex flex-col items-center pt-6 pb-12 border-r border-sentry-border bg-sentry-panel z-20">
         <div className="mb-8 p-2 bg-sentry-accent rounded-lg">
           <Shield className="w-6 h-6 text-white" />
         </div>
@@ -1030,16 +1207,16 @@ export default function App() {
             label="Map"
           />
           <NavItem 
+            icon={<Users className="w-5 h-5" />} 
+            active={activeTab === 'personnel'} 
+            onClick={() => setActiveTab('personnel')}
+            label="Personnel"
+          />
+          <NavItem 
             icon={<Database className="w-5 h-5" />} 
             active={activeTab === 'logs'} 
             onClick={() => setActiveTab('logs')}
             label="Logs"
-          />
-          <NavItem 
-            icon={<Users className="w-5 h-5" />} 
-            active={activeTab === 'personnel'} 
-            onClick={() => setActiveTab('personnel')}
-            label="Units"
           />
           <NavItem 
             icon={<MessageSquare className="w-5 h-5" />} 
@@ -1048,18 +1225,17 @@ export default function App() {
             label="Comms"
           />
         </nav>
-        <div className="mt-auto flex flex-col gap-4">
-          <div className="w-10 h-10 rounded-full bg-zinc-800 flex items-center justify-center border border-sentry-border cursor-pointer hover:bg-zinc-700 transition-colors">
-            <Settings className="w-4 h-4" />
+          {/* Logout Button */}
+          <div className="mt-auto mb-4 flex flex-col items-center gap-4 pb-4">
+            <div 
+              onClick={handleLogout}
+              className="w-10 h-10 rounded-full bg-red-500/10 flex items-center justify-center border border-red-500/20 cursor-pointer hover:bg-red-500/20 transition-colors shadow-lg shadow-red-500/5"
+              title="Exit System"
+            >
+              <LogOut className="w-4 h-4 text-red-500" />
+            </div>
           </div>
-          <div 
-            onClick={() => setIsLoggedIn(false)}
-            className="w-10 h-10 rounded-full bg-red-500/10 flex items-center justify-center border border-red-500/20 cursor-pointer hover:bg-red-500/20 transition-colors"
-          >
-            <LogOut className="w-4 h-4 text-red-500" />
-          </div>
-        </div>
-      </aside>
+        </aside>
 
       {/* Main Content Area */}
       <main className="flex-1 flex flex-col relative overflow-hidden">
@@ -1101,7 +1277,17 @@ export default function App() {
             >
               {isMonitoring ? 'STOP SURVEILLANCE' : 'START SURVEILLANCE'}
             </button>
-            <Bell className="w-5 h-5 text-zinc-500 cursor-pointer hover:text-white transition-colors" />
+            <button 
+              onClick={() => setShowAlerts(true)}
+              className={`p-2 rounded-full transition-all relative ${
+                showAlerts ? 'bg-sentry-accent/20 text-sentry-accent' : 'bg-zinc-800 text-zinc-500 hover:text-white'
+              }`}
+            >
+              <Bell className="w-5 h-5" />
+              {alerts.length > 0 && (
+                <span className="absolute top-0 right-0 w-2 h-2 bg-red-500 rounded-full border border-black" />
+              )}
+            </button>
             <div 
               onClick={() => setIsSpeakerEnabled(!isSpeakerEnabled)}
               className={`w-10 h-10 rounded-full flex items-center justify-center border cursor-pointer transition-all ${
@@ -1109,6 +1295,15 @@ export default function App() {
               }`}
             >
               {isSpeakerEnabled ? <Volume2 className="w-5 h-5" /> : <VolumeX className="w-5 h-5" />}
+            </div>
+            <div className="flex items-center gap-3 pl-4 border-l border-white/10">
+              <div className="text-right">
+                <p className="text-[10px] font-bold text-white uppercase tracking-widest">{operatorName}</p>
+                <p className="text-[8px] font-mono text-sentry-accent uppercase tracking-widest">ID: SENTRY-01</p>
+              </div>
+              <div className="w-8 h-8 rounded-lg bg-zinc-800 border border-white/10 flex items-center justify-center">
+                <User className="w-4 h-4 text-zinc-500" />
+              </div>
             </div>
           </div>
         </header>
@@ -1168,7 +1363,9 @@ export default function App() {
                             initial={{ opacity: 0 }}
                             animate={{ opacity: 1 }}
                             className={`absolute border-2 transition-colors duration-500 ${
-                              visionMode === 'thermal' ? 'border-white' : 'border-red-500 shadow-[0_0_15px_rgba(239,68,68,0.5)]'
+                              visionMode === 'thermal' ? 'border-white' : 
+                              entity.type === 'friendly' ? 'border-emerald-500 shadow-[0_0_15px_rgba(16,185,129,0.5)]' :
+                              'border-red-500 shadow-[0_0_15px_rgba(239,68,68,0.5)]'
                             }`}
                             style={{ 
                               top: `${entity.y}%`, 
@@ -1179,7 +1376,9 @@ export default function App() {
                             }}
                           >
                             <div className={`absolute -top-6 left-0 ${
-                              visionMode === 'thermal' ? 'text-white font-bold' : 'bg-red-500 text-white'
+                              visionMode === 'thermal' ? 'text-white font-bold' : 
+                              entity.type === 'friendly' ? 'bg-emerald-500 text-white' :
+                              'bg-red-500 text-white'
                             } text-[10px] font-black px-1.5 py-0.5 uppercase flex items-center gap-1`}>
                               {visionMode === 'thermal' ? (
                                 <span className="drop-shadow-md">{entity.temperature?.toFixed(1)} °C</span>
@@ -1191,7 +1390,7 @@ export default function App() {
                               )}
                             </div>
                             {visionMode !== 'thermal' && (
-                              <div className="absolute -bottom-6 right-0 text-red-500 text-[8px] font-mono font-bold">
+                              <div className={`absolute -bottom-6 right-0 ${entity.type === 'friendly' ? 'text-emerald-500' : 'text-red-500'} text-[8px] font-mono font-bold`}>
                                 CONF: {(90 + Math.random() * 9).toFixed(1)}%
                               </div>
                             )}
@@ -1207,7 +1406,17 @@ export default function App() {
                   </div>
 
                   {activeTab === 'map' ? (
-                    <LiveMap alerts={alerts} coords={coords} entities={tacticalEntities} />
+                    <LiveMap 
+                      alerts={alerts} 
+                      coords={coords} 
+                      entities={tacticalEntities} 
+                      setAlerts={setAlerts}
+                      setSystemLogs={setSystemLogs}
+                      socket={socket}
+                      selectedSector={selectedSector}
+                      setSelectedSector={setSelectedSector}
+                      setActiveCamera={setActiveCamera}
+                    />
                   ) : activeTab === 'logs' ? (
                     <div className="w-full h-full bg-zinc-900 p-6 overflow-y-auto custom-scrollbar">
                       <h2 className="text-xl font-black text-white tracking-widest uppercase mb-6 flex items-center gap-3">
@@ -1235,48 +1444,86 @@ export default function App() {
                       setIsRecording={setIsRecording}
                       currentTime={currentTime}
                     />
-                  ) : (
+                  ) : activeTab === 'personnel' ? (
                     <div className="w-full h-full bg-zinc-900 p-6 overflow-y-auto custom-scrollbar">
-                      <h2 className="text-xl font-black text-white tracking-widest uppercase mb-6 flex items-center gap-3">
-                        <Users className="w-6 h-6 text-sentry-accent" />
-                        Personnel Deployment
-                      </h2>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="flex justify-between items-center mb-6">
+                        <div className="flex items-center gap-3">
+                          <Users className="w-6 h-6 text-sentry-accent" />
+                          <h2 className="text-xl font-black text-white tracking-widest uppercase">Personnel Database</h2>
+                        </div>
+                        <div className="flex gap-2">
+                          <button className="px-3 py-1.5 bg-white/5 border border-white/10 rounded text-[9px] font-black text-zinc-400 hover:text-white hover:bg-white/10 transition-all uppercase tracking-widest">
+                            Export Roster
+                          </button>
+                          <button className="px-3 py-1.5 bg-sentry-accent/20 border border-sentry-accent/30 rounded text-[9px] font-black text-sentry-accent hover:bg-sentry-accent/30 transition-all uppercase tracking-widest">
+                            Add Personnel
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                         {/* Static Personnel */}
                         {personnel.map(p => (
-                          <div key={p.id} className="p-4 rounded-xl bg-black/40 border border-white/5 flex items-center gap-4">
-                            <div className="w-12 h-12 rounded-full bg-zinc-800 flex items-center justify-center border border-sentry-border">
-                              <User className="w-6 h-6 text-zinc-500" />
+                          <motion.div 
+                            key={p.id}
+                            whileHover={{ y: -2 }}
+                            className="p-4 rounded-xl bg-black/40 border border-white/5 flex items-center gap-4 hover:border-sentry-accent/30 transition-all group"
+                          >
+                            <div className="w-14 h-14 rounded-lg bg-zinc-800 flex flex-col items-center justify-center border border-white/10 relative overflow-hidden">
+                              <div className="text-[8px] font-black text-zinc-500 mb-0.5">ID_CODE</div>
+                              <div className="text-[10px] font-mono font-bold text-sentry-accent">{p.id.split('-')[1]}</div>
+                              <div className="absolute inset-0 bg-sentry-accent/5 opacity-0 group-hover:opacity-100 transition-opacity" />
                             </div>
-                            <div>
-                              <h3 className="text-sm font-bold text-white">{p.name}</h3>
-                              <p className="text-[10px] font-mono text-zinc-500 uppercase">{p.rank} | {p.location}</p>
-                              <div className="flex items-center gap-2 mt-1">
-                                <div className={`w-1.5 h-1.5 rounded-full ${
-                                  p.status === 'active' ? 'bg-sentry-success' : p.status === 'deployed' ? 'bg-sentry-accent' : 'bg-zinc-600'
-                                }`} />
-                                <span className="text-[9px] font-bold uppercase tracking-widest">{p.status}</span>
+                            <div className="flex-1">
+                              <div className="flex justify-between items-start">
+                                <h3 className="text-sm font-bold text-white uppercase tracking-tight">{p.name}</h3>
+                                <span className="text-[7px] font-mono text-sentry-accent">{p.id}</span>
+                              </div>
+                              <p className="text-[9px] font-mono text-zinc-500 uppercase mt-0.5">{p.rank} | {p.lastSeen || 'Unknown'}</p>
+                              <div className="flex items-center justify-between mt-2">
+                                <div className="flex items-center gap-1.5">
+                                  <div className={`w-1.5 h-1.5 rounded-full ${
+                                    p.status === 'ACTIVE' ? 'bg-sentry-success' : p.status === 'DEPLOYED' ? 'bg-sentry-accent' : 'bg-zinc-600'
+                                  }`} />
+                                  <span className="text-[8px] font-black uppercase tracking-widest text-zinc-400">{p.status}</span>
+                                </div>
+                                <span className="text-[7px] font-mono text-zinc-600">{p.clearance}</span>
                               </div>
                             </div>
-                          </div>
+                          </motion.div>
                         ))}
                         {/* Real-time Tactical Units */}
                         {tacticalEntities.filter(e => e.type === 'friendly').map(e => (
-                          <div key={e.id} className="p-4 rounded-xl bg-blue-900/10 border border-blue-500/20 flex items-center gap-4">
-                            <div className="w-12 h-12 rounded-full bg-blue-500/10 flex items-center justify-center border border-blue-500/30">
-                              <User className="w-6 h-6 text-blue-400" />
+                          <motion.div 
+                            key={e.id}
+                            whileHover={{ y: -2 }}
+                            className="p-4 rounded-xl bg-blue-900/10 border border-blue-500/20 flex items-center gap-4 hover:border-blue-500/40 transition-all group"
+                          >
+                            <div className="w-14 h-14 rounded-lg bg-blue-500/10 flex items-center justify-center border border-blue-500/30 relative overflow-hidden">
+                              <User className="w-7 h-7 text-blue-400" />
+                              <div className="absolute inset-0 bg-blue-400/5 animate-pulse" />
                             </div>
-                            <div>
-                              <h3 className="text-sm font-bold text-white">{e.label}</h3>
-                              <p className="text-[10px] font-mono text-zinc-500 uppercase">Tactical Unit | GPS Active</p>
-                              <div className="flex items-center gap-2 mt-1">
-                                <div className="w-1.5 h-1.5 rounded-full bg-sentry-success animate-pulse" />
-                                <span className="text-[9px] font-bold uppercase tracking-widest text-sentry-success">In Field</span>
+                            <div className="flex-1">
+                              <div className="flex justify-between items-start">
+                                <h3 className="text-sm font-bold text-white uppercase tracking-tight">{e.label}</h3>
+                                <span className="text-[7px] font-mono text-blue-400">UNIT_ID_{e.id.slice(0, 4)}</span>
+                              </div>
+                              <p className="text-[9px] font-mono text-zinc-500 uppercase mt-0.5">Tactical Unit | GPS Active</p>
+                              <div className="flex items-center justify-between mt-2">
+                                <div className="flex items-center gap-1.5">
+                                  <div className="w-1.5 h-1.5 rounded-full bg-sentry-success animate-pulse" />
+                                  <span className="text-[8px] font-black uppercase tracking-widest text-sentry-success">In Field</span>
+                                </div>
+                                <span className="text-[7px] font-mono text-zinc-600">POS: {e.x.toFixed(0)}, {e.y.toFixed(0)}</span>
                               </div>
                             </div>
-                          </div>
+                          </motion.div>
                         ))}
                       </div>
+                    </div>
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center text-zinc-600 uppercase font-black tracking-widest">
+                      [SELECT_TAB_FOR_DATA]
                     </div>
                   )}
 
@@ -1359,53 +1606,104 @@ export default function App() {
 
             {/* Right: Alerts and Comms Panel */}
             <div className="flex-1 flex flex-col gap-4 overflow-hidden">
-              {/* Alerts Panel */}
-              <div className="flex-1 flex flex-col bg-sentry-panel rounded-xl border border-sentry-border overflow-hidden">
-                <div className="p-4 border-b border-sentry-border flex items-center justify-between">
-                  <h2 className="text-sm font-bold uppercase tracking-widest flex items-center gap-2">
-                    <Bell className="w-4 h-4 text-sentry-accent" />
-                    Live Alerts
-                  </h2>
-                  <span className="text-[10px] font-mono bg-zinc-800 px-2 py-0.5 rounded text-zinc-400">
-                    {alerts.length} LOGGED
-                  </span>
+      {/* Alerts Modal - Large Window */}
+      <AnimatePresence>
+        {showAlerts && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm"
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="w-full max-w-4xl bg-[#0a0a0a] border border-emerald-500/30 flex flex-col max-h-[80vh] rounded-xl overflow-hidden shadow-2xl"
+            >
+              <div className="p-6 border-b border-emerald-500/30 flex items-center justify-between bg-emerald-500/5">
+                <div className="flex items-center gap-3">
+                  <AlertTriangle className="w-6 h-6 text-emerald-500" />
+                  <h2 className="text-xl font-black text-emerald-500 tracking-widest uppercase">Central Alert Repository</h2>
                 </div>
-                
-                <div className="flex-1 overflow-y-auto p-2 flex flex-col gap-2 custom-scrollbar">
-                  <AnimatePresence initial={false}>
-                    {alerts.length === 0 ? (
-                      <div className="flex-1 flex flex-col items-center justify-center text-zinc-600 gap-2 opacity-50">
-                        <Shield className="w-12 h-12" />
-                        <p className="text-xs font-mono uppercase">No active threats</p>
-                      </div>
-                    ) : (
-                      alerts.map((alert) => (
-                        <motion.div
-                          key={alert.id}
-                          initial={{ opacity: 0, x: 20 }}
-                          animate={{ opacity: 1, x: 0 }}
-                          className={`p-3 rounded-lg border flex flex-col gap-2 ${getSeverityColor(alert.severity)}`}
-                        >
-                          <div className="flex items-center justify-between">
-                            <span className="text-[10px] font-bold uppercase tracking-tighter">{alert.type}</span>
-                            <span className="text-[10px] font-mono opacity-70">
-                              {alert.timestamp.toLocaleTimeString()}
-                            </span>
-                          </div>
-                          <p className="text-xs font-medium leading-tight text-white">{alert.description}</p>
-                          {alert.imageUrl && (
-                            <div className="mt-1 rounded overflow-hidden border border-white/10 h-20">
-                              <img src={alert.imageUrl} alt="Detection" className="w-full h-full object-cover" />
-                            </div>
-                          )}
-                        </motion.div>
-                      ))
-                    )}
-                  </AnimatePresence>
-                </div>
+                <button 
+                  onClick={() => setShowAlerts(false)}
+                  className="p-2 hover:bg-emerald-500/10 text-emerald-500 transition-colors rounded-full"
+                >
+                  <X className="w-6 h-6" />
+                </button>
               </div>
 
-              {/* Comms Panel */}
+              <div className="flex-1 overflow-y-auto p-6 space-y-4 custom-scrollbar bg-black/40">
+                {alerts.length === 0 ? (
+                  <div className="text-center py-20 text-emerald-500/30 uppercase tracking-widest font-bold">
+                    No active alerts in system
+                  </div>
+                ) : (
+                  alerts.map((alert) => (
+                    <div 
+                      key={alert.id}
+                      className={`p-4 rounded-xl border flex items-start justify-between gap-4 transition-all hover:bg-white/5 ${
+                        alert.severity === 'critical' ? 'bg-red-500/5 border-red-500/30' :
+                        alert.severity === 'high' ? 'bg-orange-500/5 border-orange-500/30' :
+                        'bg-emerald-500/5 border-emerald-500/30'
+                      }`}
+                    >
+                      <div className="flex gap-4">
+                        <div className={`mt-1 p-3 rounded-xl ${
+                          alert.severity === 'critical' ? 'bg-red-500 text-white' :
+                          alert.severity === 'high' ? 'bg-orange-500 text-white' :
+                          'bg-emerald-500 text-white'
+                        }`}>
+                          <Bell className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-3 mb-2">
+                            <span className="text-[10px] font-mono text-zinc-500">
+                              {alert.timestamp instanceof Date ? alert.timestamp.toLocaleTimeString() : new Date(alert.timestamp).toLocaleTimeString()}
+                            </span>
+                            <span className={`text-[10px] font-black uppercase tracking-widest px-2 py-0.5 rounded ${
+                              alert.severity === 'critical' ? 'bg-red-500 text-white' :
+                              alert.severity === 'high' ? 'bg-orange-500 text-white' :
+                              'bg-emerald-500 text-white'
+                            }`}>
+                              {alert.severity}
+                            </span>
+                          </div>
+                          <h3 className="text-white font-bold uppercase tracking-wider mb-1">{alert.type}</h3>
+                          <p className="text-zinc-400 text-sm leading-relaxed">{alert.description}</p>
+                        </div>
+                      </div>
+                      <div className="flex flex-col gap-2">
+                        <button 
+                          onClick={() => setAlerts(prev => prev.filter(a => a.id !== alert.id))}
+                          className="p-2 border border-red-500/30 text-red-500 hover:bg-red-500 hover:text-white transition-all rounded-lg"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div className="p-4 border-t border-emerald-500/30 bg-zinc-900/50 flex justify-between items-center">
+                <div className="text-[10px] text-zinc-500 uppercase tracking-widest font-bold">
+                  Total Alerts: {alerts.length}
+                </div>
+                <button 
+                  onClick={() => setAlerts([])}
+                  className="text-[10px] text-red-500 hover:underline uppercase tracking-widest font-bold"
+                >
+                  Clear All Logs
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+          {/* Comms Panel */}
               <div className="h-48 flex flex-col bg-sentry-panel rounded-xl border border-sentry-border overflow-hidden">
                 <div className="p-3 border-b border-sentry-border bg-black/20 flex items-center justify-between">
                   <div className="flex items-center gap-2">
@@ -1456,17 +1754,40 @@ export default function App() {
           </div>
 
           {/* Bottom Stats Row */}
-          <div className="h-24 flex gap-4">
-            <StatCard label="UPTIME" value="142:12:05" icon={<Activity className="w-4 h-4" />} />
+          <div className="h-24 flex gap-4 items-stretch">
+            <StatCard label="UPTIME" value={uptime} icon={<Activity className="w-4 h-4" />} className="flex-1" />
             <StatCard 
               label="THREATS DETECTED" 
-              value={tacticalEntities.filter(e => e.type !== 'friendly').length.toString()} 
+              value={(threatCounts.low + threatCounts.medium + threatCounts.high + threatCounts.critical).toString()} 
               icon={<Shield className="w-4 h-4" />} 
-              trend={tacticalEntities.some(e => e.type === 'armed') ? 'critical' : undefined}
+              trend={threatCounts.critical > 0 ? 'critical' : undefined}
+              className="flex-1"
             />
-            <StatCard label="RANGE SCAN" value="50 KM" icon={<Navigation className="w-4 h-4" />} />
-            <StatCard label="OPERATOR" value="OFFICER_58" icon={<User className="w-4 h-4" />} />
-            <StatCard label="AI DIAGNOSTICS" value="OPTIMAL" icon={<Cpu className="w-4 h-4" />} />
+            <StatCard label="RANGE SCAN" value="50 KM" icon={<Navigation className="w-4 h-4" />} className="flex-1" />
+            <div className="flex-1 relative group h-full">
+              <StatCard 
+                label="OPERATOR" 
+                value={operatorName} 
+                icon={<User className="w-4 h-4" />} 
+                onClick={() => setIsEditingOperator(true)}
+                className="w-full h-full"
+              />
+              {isEditingOperator && (
+                <div className="absolute inset-0 bg-black/90 backdrop-blur-md rounded-xl border border-sentry-accent p-2 flex items-center gap-2 z-50">
+                  <input 
+                    autoFocus
+                    type="text"
+                    value={operatorName}
+                    onChange={(e) => setOperatorName(e.target.value.toUpperCase())}
+                    onKeyDown={(e) => e.key === 'Enter' && setIsEditingOperator(false)}
+                    onBlur={() => setIsEditingOperator(false)}
+                    className="flex-1 bg-transparent border-none text-white font-black text-sm focus:outline-none uppercase"
+                  />
+                  <button onClick={() => setIsEditingOperator(false)} className="text-sentry-accent text-[10px] font-bold">SET</button>
+                </div>
+              )}
+            </div>
+            <StatCard label="AI DIAGNOSTICS" value="OPTIMAL" icon={<Cpu className="w-4 h-4" />} className="flex-1" />
           </div>
         </div>
       </main>
@@ -1670,19 +1991,24 @@ function NavItem({ icon, active = false, onClick, label }: { icon: React.ReactNo
   );
 }
 
-function StatCard({ label, value, icon, trend }: { label: string, value: string, icon: React.ReactNode, trend?: 'critical' }) {
+function StatCard({ label, value, icon, trend, onClick, className, subtitle }: { label: string, value: string, icon: React.ReactNode, trend?: 'critical', onClick?: () => void, className?: string, subtitle?: string }) {
   return (
-    <div className={`flex-1 bg-sentry-panel rounded-xl border p-4 flex flex-col justify-between group transition-all ${
+    <div 
+      onClick={onClick}
+      className={`bg-sentry-panel rounded-xl border p-4 flex flex-col justify-between group transition-all ${
       trend === 'critical' ? 'border-red-500/50 bg-red-500/5' : 'border-sentry-border hover:border-sentry-accent/50'
-    }`}>
+    } ${onClick ? 'cursor-pointer active:scale-95' : ''} ${className || ''}`}>
       <div className={`flex items-center justify-between transition-colors ${
         trend === 'critical' ? 'text-red-500' : 'text-zinc-500 group-hover:text-sentry-accent'
       }`}>
         <span className="text-[10px] font-bold uppercase tracking-widest">{label}</span>
         {icon}
       </div>
-      <div className="flex items-end gap-2">
+      <div className="flex items-end justify-between gap-2">
         <span className={`text-xl font-mono font-bold truncate ${trend === 'critical' ? 'text-red-500' : 'text-white'}`}>{value}</span>
+        {subtitle && (
+          <span className="text-[8px] font-mono text-zinc-500 mb-1">{subtitle}</span>
+        )}
         {trend === 'critical' && (
           <div className="w-2 h-2 rounded-full bg-red-500 animate-ping mb-1" />
         )}

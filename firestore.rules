@@ -1,0 +1,132 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: alerts
+    // Document ID: alertId
+    // Fields:
+    //   - id: string (required) - Unique alert ID
+    //   - timestamp: timestamp (required) - When the alert was generated
+    //   - type: string (required) - Type of alert
+    //   - description: string (required) - Detailed description
+    //   - severity: string (required, enum: low, medium, high, critical)
+    //   - status: string (required, enum: active, resolved, dismissed)
+    //
+    // Collection: logs
+    // Document ID: logId
+    // Fields:
+    //   - id: string (required) - Unique log ID
+    //   - timestamp: timestamp (required) - When the log was created
+    //   - event: string (required) - The event description
+    //   - type: string (required, enum: info, warning, error, success)
+    //
+    // Collection: personnel
+    // Document ID: personnelId
+    // Fields:
+    //   - id: string (required) - Unique personnel ID
+    //   - name: string (required) - Full name
+    //   - rank: string (required) - Rank or title
+    //   - clearance: string (required, enum: LEVEL_1, LEVEL_2, LEVEL_3, LEVEL_4, LEVEL_5)
+    //   - status: string (required, enum: ACTIVE, OFF_DUTY, DEPLOYED, INACTIVE)
+    //   - lastSeen: string (optional) - Last known location
+    //   - photo: string (optional) - URL to profile photo
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+          (request.auth.token.email == "niharikaaa58@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function validStringLength(field, minLen, maxLen) {
+      return request.resource.data[field] is string &&
+        request.resource.data[field].size() >= minLen &&
+        request.resource.data[field].size() <= maxLen;
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidAlert(data) {
+      return hasRequiredFields(['id', 'timestamp', 'type', 'description', 'severity', 'status']) &&
+             hasOnlyAllowedFields(['id', 'timestamp', 'type', 'description', 'severity', 'status']) &&
+             data.id is string &&
+             data.timestamp is timestamp &&
+             data.type is string && data.type.size() > 0 && data.type.size() < 100 &&
+             data.description is string && data.description.size() > 0 && data.description.size() < 1000 &&
+             data.severity in ['low', 'medium', 'high', 'critical'] &&
+             data.status in ['active', 'resolved', 'dismissed'];
+    }
+
+    function isValidLog(data) {
+      return hasRequiredFields(['id', 'timestamp', 'event', 'type']) &&
+             hasOnlyAllowedFields(['id', 'timestamp', 'event', 'type']) &&
+             data.id is string &&
+             data.timestamp is timestamp &&
+             data.event is string && data.event.size() > 0 && data.event.size() < 1000 &&
+             data.type in ['info', 'warning', 'error', 'success'];
+    }
+
+    function isValidPersonnel(data) {
+      return hasRequiredFields(['id', 'name', 'rank', 'clearance', 'status']) &&
+             hasOnlyAllowedFields(['id', 'name', 'rank', 'clearance', 'status', 'lastSeen', 'photo']) &&
+             data.id is string &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.rank is string && data.rank.size() > 0 && data.rank.size() < 100 &&
+             data.clearance in ['LEVEL_1', 'LEVEL_2', 'LEVEL_3', 'LEVEL_4', 'LEVEL_5'] &&
+             data.status in ['ACTIVE', 'OFF_DUTY', 'DEPLOYED', 'INACTIVE'];
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /alerts/{alertId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidAlert(request.resource.data);
+      allow update: if isAdmin() && isValidAlert(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    match /logs/{logId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidLog(request.resource.data);
+      allow update: if isAdmin() && isValidLog(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    match /personnel/{personnelId} {
+      allow read: if isAuthenticated();
+      allow create: if isAdmin() && isValidPersonnel(request.resource.data);
+      allow update: if isAdmin() && isValidPersonnel(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
+      allow create: if isAuthenticated() && (request.auth.uid == userId && request.resource.data.role == 'operator') || isAdmin();
+      allow update: if isAdmin();
+    }
+  }
+}
